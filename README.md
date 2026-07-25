@@ -164,6 +164,87 @@ curl -X POST "http://localhost:8080/search" \
 默认启用无状态模式（`MCP_STATELESS=true`），可避免客户端出现 `session not found`。
 如需有状态会话，请将 `MCP_STATELESS=false`，并确保上游反向代理正确透传 `Mcp-Session-Id` 且启用会话粘性（sticky）。
 
+#### Codex 配置示例（原生 Streamable HTTP）
+
+Codex 原生支持 Streamable HTTP MCP 和 Bearer Token 鉴权，无需安装 `mcp-remote`。参见 [Codex MCP 官方说明](https://learn.chatgpt.com/docs/extend/mcp)。准备以下信息：
+
+- MCP URL：本地部署使用 `http://localhost:8080/mcp`，公网部署使用 `https://您的域名/mcp`。
+- Master Key：本项目首次启动时生成的 Master Key，不是 Tavily API Key。
+
+以下两种鉴权方式任选其一。
+
+**方式一：通过环境变量保存 Master Key（推荐）**
+
+添加 MCP：
+
+```bash
+codex mcp add tavily-proxy \
+  --url https://您的域名/mcp \
+  --bearer-token-env-var TAVILY_PROXY_MASTER_KEY
+```
+
+启动 Codex 前设置环境变量。运行后粘贴 Master Key 并回车，密钥不会出现在 shell history 中：
+
+```bash
+read -s TAVILY_PROXY_MASTER_KEY
+export TAVILY_PROXY_MASTER_KEY
+```
+
+macOS 从桌面启动 Codex 时，可写入当前登录会话的环境：
+
+```bash
+read -s TAVILY_PROXY_MASTER_KEY
+launchctl setenv TAVILY_PROXY_MASTER_KEY "$TAVILY_PROXY_MASTER_KEY"
+unset TAVILY_PROXY_MASTER_KEY
+```
+
+> `launchctl setenv` 仅对当前 macOS 登录会话有效，注销或重启系统后需要重新设置。
+
+**方式二：直接写入 `config.toml`**
+
+编辑全局配置 `~/.codex/config.toml`，或可信项目中的 `.codex/config.toml`：
+
+```toml
+[mcp_servers.tavily-proxy]
+url = "https://您的域名/mcp"
+http_headers = { Authorization = "Bearer 您的_MASTER_KEY" }
+```
+
+使用静态 Header 时，删除同一服务下的 `bearer_token_env_var`，避免维护两套凭据。Master Key 会以明文保存，建议限制全局配置文件权限：
+
+```bash
+chmod 600 ~/.codex/config.toml
+```
+
+**确认配置**
+
+```bash
+codex mcp get tavily-proxy
+codex mcp list
+```
+
+完全退出并重新打开 Codex，然后新建任务。在 Codex 中输入 `/mcp`，应能看到：
+
+- `tavily_search`
+- `tavily_extract`
+- `tavily_crawl`
+- `tavily_map`
+- `tavily_research`
+- `tavily_usage`
+
+调用示例：
+
+```text
+使用 tavily-proxy 搜索 Tavily 最新 API 变化，整理结论并附来源链接。
+```
+
+**常见问题**
+
+- **配置已启用，但当前任务没有工具**：MCP 工具在任务启动时加载。完全退出并重启 Codex，再新建任务；旧任务不会动态获得新工具。
+- **初始化返回 `401`**：Master Key 错误、已重置，或误用了 Tavily API Key。重新获取当前 Master Key 并更新配置。
+- **`codex mcp list` 显示 enabled，仍无法调用**：该命令只能确认配置已加载，不能代替远端鉴权与初始化检查。优先检查 Master Key、MCP URL 和反向代理配置。
+- **公网部署连接失败**：确认 URL 以 `/mcp` 结尾，并确保反向代理允许 MCP 请求且透传 `Authorization` Header。
+
 #### VS Code 配置示例 (配合 mcp-remote)
 
 ```json
