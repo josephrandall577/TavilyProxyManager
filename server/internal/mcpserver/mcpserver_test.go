@@ -63,36 +63,15 @@ func TestLatestTavilyInputSchemas(t *testing.T) {
 			t.Errorf("map schema contains unsupported %q", name)
 		}
 	}
-	researchStream := mustStructuredMap(t, schemaProperties(t, tavilyResearchInputSchema)["stream"])
-	if researchStream["const"] != false {
-		t.Errorf("research stream const = %v, want false", researchStream["const"])
+	if _, ok := schemaProperties(t, tavilyResearchInputSchema)["stream"]; ok {
+		t.Error("official research schema must not expose stream")
 	}
 }
 
-func TestTavilyResearchToolsProxyCreateAndStatus(t *testing.T) {
+func TestTavilyResearchToolReturnsCompletedReport(t *testing.T) {
 	t.Parallel()
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	ctx := context.Background()
-	database, err := db.Open(filepath.Join(t.TempDir(), "app.db"))
-	if err != nil {
-		t.Fatalf("db open: %v", err)
-	}
-	sqlDB, err := database.DB()
-	if err != nil {
-		t.Fatalf("db handle: %v", err)
-	}
-	t.Cleanup(func() { _ = sqlDB.Close() })
-
-	master := services.NewMasterKeyService(database, logger)
-	if err := master.LoadOrCreate(ctx); err != nil {
-		t.Fatalf("master key init: %v", err)
-	}
-	keys := services.NewKeyService(database)
-	if _, err := keys.Create(ctx, "tvly-pool", "", 1000); err != nil {
-		t.Fatalf("create key: %v", err)
-	}
-
+	var createCalls, statusCalls int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer tvly-pool" {
 			t.Errorf("unexpected authorization: %q", r.Header.Get("Authorization"))
@@ -100,6 +79,7 @@ func TestTavilyResearchToolsProxyCreateAndStatus(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/research":
+			atomic.AddInt32(&createCalls, 1)
 			body, _ := io.ReadAll(r.Body)
 			if !bytes.Contains(body, []byte(`"input":"latest Tavily API"`)) {
 				t.Errorf("unexpected research body: %s", body)
@@ -107,39 +87,87 @@ func TestTavilyResearchToolsProxyCreateAndStatus(t *testing.T) {
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"request_id":"research-1","status":"pending"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/research/research-1":
-			_, _ = w.Write([]byte(`{"request_id":"research-1","status":"completed"}`))
+			atomic.AddInt32(&statusCalls, 1)
+			_, _ = w.Write([]byte(`{"request_id":"research-1","status":"completed","content":"completed report"}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
 	t.Cleanup(upstream.Close)
 
-	handler := NewHandler(Dependencies{
-		MasterKey:  master,
-		Proxy:      services.NewTavilyProxy(upstream.URL, 3*time.Second, keys, nil, nil, logger),
-		Stateless:  true,
-		SessionTTL: time.Minute,
-	})
-	server := httptest.NewServer(handler)
-	t.Cleanup(server.Close)
-	session := connectMCPClient(t, server.URL, master.Get())
-	defer session.Close()
+	session := connectResearchMCPTest(t, upstream.URL)
 
-	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	listed, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	var names []string
+	wantNames := map[string]bool{
+		"tavily_search": true, "tavily_extract": true, "tavily_crawl": true,
+		"tavily_map": true, "tavily_research": true, "tavily_usage": true,
+	}
+	for _, tool := range listed.Tools {
+		names = append(names, tool.Name)
+		if !wantNames[tool.Name] {
+			t.Errorf("unexpected tool %q", tool.Name)
+		}
+	}
+	if len(names) != len(wantNames) {
+		t.Fatalf("tool names = %v, want %v", names, wantNames)
+	}
+
+	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	created, err := session.CallTool(callCtx, &mcp.CallToolParams{
-		Name:      "tavily-research",
+	result, err := session.CallTool(callCtx, &mcp.CallToolParams{
+		Name:      "tavily_research",
 		Arguments: map[string]any{"input": "latest Tavily API"},
 	})
-	if err != nil || created.IsError {
-		t.Fatalf("create research: result=%+v err=%v", created, err)
+	if err != nil || result.IsError {
+		t.Fatalf("research: result=%+v err=%v", result, err)
 	}
-	status, err := session.CallTool(callCtx, &mcp.CallToolParams{
-		Name:      "tavily-research-status",
-		Arguments: map[string]any{"request_id": "research-1"},
+	if got := mustText(t, result); got != "completed report" {
+		t.Fatalf("research result = %q, want completed report", got)
+	}
+	if createCalls != 1 || statusCalls != 1 {
+		t.Fatalf("unexpected upstream calls: create=%d status=%d", createCalls, statusCalls)
+	}
+}
+
+func TestTavilyResearchToolConsumesRequiredStream(t *testing.T) {
+	t.Parallel()
+
+	var calls int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		body, _ := io.ReadAll(r.Body)
+		if !bytes.Contains(body, []byte(`"stream":true`)) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"detail":{"error_code":"research_stream_required"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"streamed \"}}]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"report\"}}]}\n\n")
+		_, _ = io.WriteString(w, "event: done\ndata: {}\n\n")
+	}))
+	t.Cleanup(upstream.Close)
+
+	session := connectResearchMCPTest(t, upstream.URL)
+	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := session.CallTool(callCtx, &mcp.CallToolParams{
+		Name:      "tavily_research",
+		Arguments: map[string]any{"input": "stream this", "model": "mini"},
 	})
-	if err != nil || status.IsError {
-		t.Fatalf("get research status: result=%+v err=%v", status, err)
+	if err != nil || result.IsError {
+		t.Fatalf("research: result=%+v err=%v", result, err)
+	}
+	if got := mustText(t, result); got != "streamed report" {
+		t.Fatalf("research result = %q, want streamed report", got)
+	}
+	if calls != 2 {
+		t.Fatalf("upstream calls = %d, want 2", calls)
 	}
 }
 
@@ -210,7 +238,7 @@ func TestTavilyUsage_ReturnsAggregatedStatsWithoutUpstreamCall(t *testing.T) {
 
 	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	res, err := session.CallTool(callCtx, &mcp.CallToolParams{Name: "tavily-usage"})
+	res, err := session.CallTool(callCtx, &mcp.CallToolParams{Name: "tavily_usage"})
 	if err != nil {
 		t.Fatalf("call tool: %v", err)
 	}
@@ -240,7 +268,7 @@ func TestTavilyUsage_ReturnsAggregatedStatsWithoutUpstreamCall(t *testing.T) {
 	}
 
 	if got := atomic.LoadInt32(&upstreamCalls); got != 0 {
-		t.Fatalf("unexpected upstream calls for tavily-usage: %d", got)
+		t.Fatalf("unexpected upstream calls for tavily_usage: %d", got)
 	}
 }
 
@@ -278,7 +306,7 @@ func TestTavilyUsage_ReturnsErrorWhenStatsUnavailable(t *testing.T) {
 
 	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	res, err := session.CallTool(callCtx, &mcp.CallToolParams{Name: "tavily-usage"})
+	res, err := session.CallTool(callCtx, &mcp.CallToolParams{Name: "tavily_usage"})
 	if err != nil {
 		t.Fatalf("call tool: %v", err)
 	}
@@ -333,6 +361,43 @@ type authRoundTripper struct {
 	token string
 }
 
+func connectResearchMCPTest(t *testing.T, upstreamURL string) *mcp.ClientSession {
+	t.Helper()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+	database, err := db.Open(filepath.Join(t.TempDir(), "app.db"))
+	if err != nil {
+		t.Fatalf("db open: %v", err)
+	}
+	sqlDB, err := database.DB()
+	if err != nil {
+		t.Fatalf("db handle: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	master := services.NewMasterKeyService(database, logger)
+	if err := master.LoadOrCreate(ctx); err != nil {
+		t.Fatalf("master key init: %v", err)
+	}
+	keys := services.NewKeyService(database)
+	if _, err := keys.Create(ctx, "tvly-pool", "", 1); err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+
+	handler := NewHandler(Dependencies{
+		MasterKey:  master,
+		Proxy:      services.NewTavilyProxy(upstreamURL, 3*time.Second, keys, nil, nil, logger),
+		Stateless:  true,
+		SessionTTL: time.Minute,
+	})
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	session := connectMCPClient(t, server.URL, master.Get())
+	t.Cleanup(func() { _ = session.Close() })
+	return session
+}
+
 func (t *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	transport := t.base
 	if transport == nil {
@@ -368,19 +433,24 @@ func connectMCPClient(t *testing.T, endpoint, token string) *mcp.ClientSession {
 func mustTextJSON(t *testing.T, result *mcp.CallToolResult) map[string]any {
 	t.Helper()
 
+	text := mustText(t, result)
+	var out map[string]any
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("text content is not json: %v (text=%q)", err, text)
+	}
+	return out
+}
+
+func mustText(t *testing.T, result *mcp.CallToolResult) string {
+	t.Helper()
 	if len(result.Content) == 0 {
-		t.Fatalf("missing content")
+		t.Fatal("missing content")
 	}
 	text, ok := result.Content[0].(*mcp.TextContent)
 	if !ok {
 		t.Fatalf("unexpected content type: %T", result.Content[0])
 	}
-
-	var out map[string]any
-	if err := json.Unmarshal([]byte(text.Text), &out); err != nil {
-		t.Fatalf("text content is not json: %v (text=%q)", err, text.Text)
-	}
-	return out
+	return text.Text
 }
 
 func mustStructuredMap(t *testing.T, v any) map[string]any {

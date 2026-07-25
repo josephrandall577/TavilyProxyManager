@@ -32,14 +32,16 @@ type TavilyProxy struct {
 }
 
 type ProxyRequest struct {
-	Method      string
-	Path        string
-	RawQuery    string
-	Headers     http.Header
-	Body        []byte
-	ClientIP    string
-	ContentType string
-	Stream      func(ProxyStreamResponse) error
+	Method         string
+	Path           string
+	RawQuery       string
+	Headers        http.Header
+	Body           []byte
+	ClientIP       string
+	ContentType    string
+	Stream         func(ProxyStreamResponse) error
+	Timeout        time.Duration
+	PreferredKeyID uint
 }
 
 type ProxyStreamResponse struct {
@@ -57,6 +59,7 @@ type ProxyResponse struct {
 	TavilyRequestID string
 	Streamed        bool
 	Credits         int
+	KeyID           uint
 }
 
 func NewTavilyProxy(baseURL string, timeout time.Duration, keys *KeyService, logs *LogService, stats *StatsService, logger *slog.Logger) *TavilyProxy {
@@ -165,6 +168,22 @@ func (p *TavilyProxy) Do(ctx context.Context, req ProxyRequest) (ProxyResponse, 
 	if err != nil {
 		return ProxyResponse{}, err
 	}
+	if req.PreferredKeyID != 0 {
+		preferred, err := p.keys.FindByID(ctx, req.PreferredKeyID)
+		if err != nil {
+			return ProxyResponse{}, err
+		}
+		if preferred != nil && preferred.IsActive && !preferred.IsInvalid {
+			ordered := make([]models.APIKey, 1, len(candidates)+1)
+			ordered[0] = *preferred
+			for _, candidate := range candidates {
+				if candidate.ID != preferred.ID {
+					ordered = append(ordered, candidate)
+				}
+			}
+			candidates = ordered
+		}
+	}
 
 	if len(candidates) == 0 {
 		p.logger.Warn("no available keys",
@@ -196,9 +215,13 @@ func (p *TavilyProxy) Do(ctx context.Context, req ProxyRequest) (ProxyResponse, 
 		return ProxyResponse{}, ErrNoAvailableKeys
 	}
 	attemptCtx := ctx
-	if p.client.Timeout > 0 {
+	timeout := p.client.Timeout
+	if req.Timeout > 0 {
+		timeout = req.Timeout
+	}
+	if timeout > 0 {
 		var cancel context.CancelFunc
-		attemptCtx, cancel = context.WithTimeout(ctx, p.client.Timeout)
+		attemptCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
 
@@ -267,10 +290,15 @@ func (p *TavilyProxy) Do(ctx context.Context, req ProxyRequest) (ProxyResponse, 
 			if strings.EqualFold(req.Method, http.MethodGet) && strings.HasPrefix(req.Path, "/research/") && i < len(candidates)-1 {
 				continue
 			}
+			if strings.EqualFold(req.Method, http.MethodGet) && strings.HasPrefix(req.Path, "/research/") && hasRateLimitedResp {
+				continue
+			}
 		}
 
 		if status >= http.StatusOK && status < http.StatusMultipleChoices && !strings.EqualFold(req.Method, http.MethodGet) {
-			_ = p.keys.IncrementUsed(ctx, key.ID, resp.Credits)
+			quotaCtx, cancelQuota := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			_ = p.keys.IncrementUsed(quotaCtx, key.ID, resp.Credits)
+			cancelQuota()
 		}
 
 		createdAt := time.Now()
@@ -448,7 +476,13 @@ func (p *TavilyProxy) tryKey(ctx context.Context, keyID uint, tavilyKey string, 
 	)
 
 	start := time.Now()
-	upstreamResp, err := p.client.Do(upstreamReq)
+	client := p.client
+	if req.Timeout > 0 && req.Timeout != p.client.Timeout {
+		clientCopy := *p.client
+		clientCopy.Timeout = req.Timeout
+		client = &clientCopy
+	}
+	upstreamResp, err := client.Do(upstreamReq)
 	latencyMs := time.Since(start).Milliseconds()
 	if err != nil {
 		p.logger.Warn("upstream call error",
@@ -473,6 +507,7 @@ func (p *TavilyProxy) tryKey(ctx context.Context, keyID uint, tavilyKey string, 
 		resp := ProxyResponse{
 			Streamed: true,
 			Credits:  1,
+			KeyID:    keyID,
 		}
 		err := req.Stream(ProxyStreamResponse{
 			StatusCode:     upstreamResp.StatusCode,
@@ -502,6 +537,7 @@ func (p *TavilyProxy) tryKey(ctx context.Context, keyID uint, tavilyKey string, 
 		Body:           body,
 		ProxyRequestID: proxyReqID,
 		Credits:        credits,
+		KeyID:          keyID,
 	}, upstreamResp.StatusCode, latencyMs, requestID, nil
 }
 

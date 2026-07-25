@@ -1,9 +1,12 @@
 package mcpserver
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -29,33 +32,28 @@ func NewHandler(deps Dependencies) http.Handler {
 	}, nil)
 
 	addProxyTool(server, deps.Proxy, &mcp.Tool{
-		Name:        "tavily-search",
+		Name:        "tavily_search",
 		Description: "Execute a search query using Tavily Search (via Tavily Proxy Pool). Returns ranked results and optional answer/raw_content/images/usage.",
 		InputSchema: tavilySearchInputSchema,
 	}, http.MethodPost, "/search")
 	addProxyTool(server, deps.Proxy, &mcp.Tool{
-		Name:        "tavily-extract",
+		Name:        "tavily_extract",
 		Description: "Extract structured content from URLs (via Tavily Proxy Pool)",
 		InputSchema: tavilyExtractInputSchema,
 	}, http.MethodPost, "/extract")
 	addProxyTool(server, deps.Proxy, &mcp.Tool{
-		Name:        "tavily-crawl",
+		Name:        "tavily_crawl",
 		Description: "Crawl a website starting from a root URL (via Tavily Proxy Pool)",
 		InputSchema: tavilyCrawlInputSchema,
 	}, http.MethodPost, "/crawl")
 	addProxyTool(server, deps.Proxy, &mcp.Tool{
-		Name:        "tavily-map",
+		Name:        "tavily_map",
 		Description: "Map a website's URL structure (via Tavily Proxy Pool)",
 		InputSchema: tavilyMapInputSchema,
 	}, http.MethodPost, "/map")
-	addProxyTool(server, deps.Proxy, &mcp.Tool{
-		Name:        "tavily-research",
-		Description: "Create a Tavily Research task (via Tavily Proxy Pool)",
-		InputSchema: tavilyResearchInputSchema,
-	}, http.MethodPost, "/research")
-	addResearchStatusTool(server, deps.Proxy)
+	addResearchTool(server, deps.Proxy)
 	addUsageTool(server, deps.Stats, &mcp.Tool{
-		Name:        "tavily-usage",
+		Name:        "tavily_usage",
 		Description: "Get aggregated usage/quota info from local key statistics",
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 	})
@@ -88,51 +86,221 @@ func addProxyTool(server *mcp.Server, proxy *services.TavilyProxy, tool *mcp.Too
 			}
 		}
 
-		headers := make(http.Header)
-		headers.Set("User-Agent", "tavily-proxy-mcp")
-		if method == http.MethodPost {
-			headers.Set("Content-Type", "application/json")
-		}
-
-		resp, err := proxy.Do(ctx, services.ProxyRequest{
-			Method:      method,
-			Path:        path,
-			Headers:     headers,
-			Body:        body,
-			ClientIP:    "mcp",
-			ContentType: "application/json",
-		})
+		resp, err := doProxyRequest(ctx, proxy, method, path, body, nil, 0, 0)
 		return proxyToolResult(resp, err), nil
 	})
 }
 
-func addResearchStatusTool(server *mcp.Server, proxy *services.TavilyProxy) {
+func addResearchTool(server *mcp.Server, proxy *services.TavilyProxy) {
 	server.AddTool(&mcp.Tool{
-		Name:        "tavily-research-status",
-		Description: "Get a Tavily Research task status and result (via Tavily Proxy Pool)",
-		InputSchema: map[string]any{
-			"type":                 "object",
-			"additionalProperties": false,
-			"required":             []string{"request_id"},
-			"properties": map[string]any{
-				"request_id": map[string]any{"type": "string", "minLength": 1},
-			},
-		},
+		Name:        "tavily_research",
+		Description: "Perform comprehensive research on a given topic or question. Returns the completed report.",
+		InputSchema: tavilyResearchInputSchema,
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var args struct {
-			RequestID string `json:"request_id"`
+			Input string `json:"input"`
+			Model string `json:"model"`
 		}
-		if err := json.Unmarshal(req.Params.Arguments, &args); err != nil || strings.TrimSpace(args.RequestID) == "" {
-			return proxyToolResult(services.ProxyResponse{}, fmt.Errorf("request_id is required")), nil
+		if err := json.Unmarshal(req.Params.Arguments, &args); err != nil || strings.TrimSpace(args.Input) == "" {
+			return researchToolResult("", errors.New("input is required")), nil
 		}
-		resp, err := proxy.Do(ctx, services.ProxyRequest{
-			Method:   http.MethodGet,
-			Path:     "/research/" + url.PathEscape(args.RequestID),
-			Headers:  http.Header{"User-Agent": {"tavily-proxy-mcp"}},
-			ClientIP: "mcp",
-		})
-		return proxyToolResult(resp, err), nil
+		if args.Model == "" {
+			args.Model = "auto"
+		}
+		content, err := runResearch(ctx, proxy, args.Input, args.Model)
+		return researchToolResult(content, err), nil
 	})
+}
+
+func runResearch(ctx context.Context, proxy *services.TavilyProxy, input, model string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, researchMaxDuration(model))
+	defer cancel()
+
+	body, err := json.Marshal(map[string]any{"input": input, "model": model})
+	if err != nil {
+		return "", err
+	}
+	resp, err := doProxyRequest(ctx, proxy, http.MethodPost, "/research", body, nil, 0, 0)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode == http.StatusBadRequest && researchStreamRequired(resp.Body) {
+		return runResearchStream(ctx, proxy, input, model, resp.KeyID)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return "", fmt.Errorf("upstream status %d: %s", resp.StatusCode, strings.TrimSpace(string(resp.Body)))
+	}
+
+	var created struct {
+		RequestID string `json:"request_id"`
+	}
+	if json.Unmarshal(resp.Body, &created) != nil || created.RequestID == "" {
+		return "", errors.New("no request_id returned from research endpoint")
+	}
+
+	pollInterval := 2 * time.Second
+	for {
+		timer := time.NewTimer(pollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", ctx.Err()
+		case <-timer.C:
+		}
+
+		statusResp, err := doProxyRequest(ctx, proxy, http.MethodGet, "/research/"+url.PathEscape(created.RequestID), nil, nil, 0, resp.KeyID)
+		if err != nil {
+			return "", err
+		}
+		if statusResp.StatusCode == http.StatusNotFound {
+			return "", errors.New("research task not found")
+		}
+		if statusResp.StatusCode < http.StatusOK || statusResp.StatusCode >= http.StatusMultipleChoices {
+			return "", fmt.Errorf("upstream status %d: %s", statusResp.StatusCode, strings.TrimSpace(string(statusResp.Body)))
+		}
+		var status struct {
+			Status  string `json:"status"`
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal(statusResp.Body, &status); err != nil {
+			return "", err
+		}
+		switch status.Status {
+		case "completed":
+			return status.Content, nil
+		case "failed":
+			return "", errors.New("research task failed")
+		}
+		pollInterval = min(pollInterval+pollInterval/2, 10*time.Second)
+	}
+}
+
+func researchStreamRequired(body []byte) bool {
+	var response struct {
+		Detail struct {
+			ErrorCode string `json:"error_code"`
+		} `json:"detail"`
+	}
+	return json.Unmarshal(body, &response) == nil && response.Detail.ErrorCode == "research_stream_required"
+}
+
+func researchMaxDuration(model string) time.Duration {
+	if model == "mini" {
+		return 5 * time.Minute
+	}
+	return 15 * time.Minute
+}
+
+func runResearchStream(ctx context.Context, proxy *services.TavilyProxy, input, model string, keyID uint) (string, error) {
+	body, err := json.Marshal(map[string]any{"input": input, "model": model, "stream": true})
+	if err != nil {
+		return "", err
+	}
+	var content string
+	resp, err := doProxyRequest(ctx, proxy, http.MethodPost, "/research", body, func(stream services.ProxyStreamResponse) error {
+		content, err = readResearchStream(stream.Body)
+		return err
+	}, researchMaxDuration(model), keyID)
+	if err != nil {
+		return "", err
+	}
+	if !resp.Streamed {
+		return "", fmt.Errorf("upstream status %d: %s", resp.StatusCode, strings.TrimSpace(string(resp.Body)))
+	}
+	return content, nil
+}
+
+func readResearchStream(body io.Reader) (string, error) {
+	reader := bufio.NewReader(body)
+	var content strings.Builder
+	eventType := "message"
+	var dataLines []string
+
+	flush := func() (bool, error) {
+		data := strings.Join(dataLines, "\n")
+		defer func() {
+			eventType = "message"
+			dataLines = dataLines[:0]
+		}()
+		switch eventType {
+		case "done":
+			if content.Len() == 0 {
+				return false, errors.New("research stream completed without content")
+			}
+			return true, nil
+		case "error":
+			var event struct {
+				Error any `json:"error"`
+			}
+			if json.Unmarshal([]byte(data), &event) == nil && event.Error != nil {
+				return false, fmt.Errorf("research stream error: %v", event.Error)
+			}
+			return false, fmt.Errorf("research stream error: %s", data)
+		}
+		var event struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal([]byte(data), &event) == nil && len(event.Choices) > 0 {
+			content.WriteString(event.Choices[0].Delta.Content)
+		}
+		return false, nil
+	}
+
+	for {
+		line, readErr := reader.ReadString('\n')
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			done, err := flush()
+			if err != nil {
+				return "", err
+			}
+			if done {
+				return content.String(), nil
+			}
+		} else if strings.HasPrefix(line, "event:") {
+			eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		} else if strings.HasPrefix(line, "data:") {
+			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+
+		if readErr != nil {
+			if !errors.Is(readErr, io.EOF) {
+				return "", readErr
+			}
+			if eventType != "message" || len(dataLines) > 0 {
+				done, err := flush()
+				if err != nil {
+					return "", err
+				}
+				if done {
+					return content.String(), nil
+				}
+			}
+			return "", errors.New("research stream ended before completion")
+		}
+	}
+}
+
+func doProxyRequest(ctx context.Context, proxy *services.TavilyProxy, method, path string, body []byte, stream func(services.ProxyStreamResponse) error, timeout time.Duration, preferredKeyID uint) (services.ProxyResponse, error) {
+	headers := http.Header{"User-Agent": {"tavily-proxy-mcp"}}
+	if method == http.MethodPost {
+		headers.Set("Content-Type", "application/json")
+	}
+	return proxy.Do(ctx, services.ProxyRequest{
+		Method: method, Path: path, Headers: headers, Body: body,
+		ClientIP: "mcp", ContentType: "application/json", Stream: stream, Timeout: timeout, PreferredKeyID: preferredKeyID,
+	})
+}
+
+func researchToolResult(content string, err error) *mcp.CallToolResult {
+	if err != nil {
+		content = "Research Error: " + err.Error()
+	}
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: content}}}
 }
 
 func proxyToolResult(resp services.ProxyResponse, err error) *mcp.CallToolResult {
@@ -577,32 +745,12 @@ var tavilyCrawlInputSchema = map[string]any{
 }
 
 var tavilyResearchInputSchema = map[string]any{
-	"type":                 "object",
-	"additionalProperties": true,
-	"required":             []string{"input"},
+	"type":     "object",
+	"required": []string{"input"},
 	"properties": map[string]any{
 		"input": map[string]any{"type": "string", "description": "Research task or question."},
 		"model": map[string]any{
 			"type": "string", "enum": []string{"mini", "pro", "auto"}, "default": "auto",
-		},
-		"stream": map[string]any{
-			"type": "boolean", "const": false, "default": false, "description": "Use the REST endpoint for real-time SSE delivery.",
-		},
-		"output_schema":   map[string]any{"type": "object"},
-		"citation_format": map[string]any{"type": "string", "enum": []string{"numbered", "mla", "apa", "chicago"}},
-		"include_domains": map[string]any{"type": "array", "maxItems": 20, "items": map[string]any{"type": "string"}},
-		"exclude_domains": map[string]any{"type": "array", "maxItems": 20, "items": map[string]any{"type": "string"}},
-		"output_length":   map[string]any{"type": "string", "enum": []string{"short", "standard", "long"}},
-		"files": map[string]any{
-			"type": "array", "maxItems": 5,
-			"items": map[string]any{
-				"type": "object", "required": []string{"name", "data", "type"}, "additionalProperties": false,
-				"properties": map[string]any{
-					"name": map[string]any{"type": "string"},
-					"data": map[string]any{"type": "string", "description": "Base64-encoded file data."},
-					"type": map[string]any{"type": "string"},
-				},
-			},
 		},
 	},
 }

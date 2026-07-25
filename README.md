@@ -159,7 +159,7 @@ curl -X POST "http://localhost:8080/search" \
 ### MCP (Model Context Protocol)
 
 服务在 `http://localhost:8080/mcp` 提供 HTTP MCP 端点。
-内置 `tavily-search`、`tavily-extract`、`tavily-crawl`、`tavily-map`、`tavily-research`、`tavily-research-status` 和 `tavily-usage` 工具；实时 Research 流请使用 REST API。
+内置与 Tavily 官方一致的 `tavily_search`、`tavily_extract`、`tavily_crawl`、`tavily_map` 和 `tavily_research` 工具，以及本项目扩展的 `tavily_usage`。`tavily_research` 会在服务端轮询或消费 SSE，并在单次工具调用中返回完整报告。
 
 默认启用无状态模式（`MCP_STATELESS=true`），可避免客户端出现 `session not found`。
 如需有状态会话，请将 `MCP_STATELESS=false`，并确保上游反向代理正确透传 `Mcp-Session-Id` 且启用会话粘性（sticky）。
