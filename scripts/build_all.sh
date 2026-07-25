@@ -13,8 +13,10 @@ npm run build
 
 echo "Preparing server public directory..."
 mkdir -p "$ROOT_DIR/server/public"
-rm -rf "$ROOT_DIR/server/public/*"
+rm -rf "$ROOT_DIR/server/public/"*
 cp -r "$ROOT_DIR/web/dist/"* "$ROOT_DIR/server/public/"
+
+mkdir -p "$ROOT_DIR/build"
 
 echo "Building Windows binary..."
 cd "$ROOT_DIR/server"

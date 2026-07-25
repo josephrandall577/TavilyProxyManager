@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,10 +20,13 @@ import (
 	"tavily-proxy/server/internal/services"
 )
 
+func init() {
+	gin.SetMode(gin.TestMode)
+}
+
 func TestProxy_LegacyBodyAPIKey_TavilyKey_IsUnauthorized(t *testing.T) {
 	t.Parallel()
 
-	gin.SetMode(gin.TestMode)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	const directKey = "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"
@@ -81,7 +85,6 @@ func TestProxy_LegacyBodyAPIKey_TavilyKey_IsUnauthorized(t *testing.T) {
 func TestProxy_LegacyBodyAPIKey_MasterKey_StripsFieldAndUsesPoolKey(t *testing.T) {
 	t.Parallel()
 
-	gin.SetMode(gin.TestMode)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	const poolKey = "tvly-pool-1234567890abcdef"
@@ -148,7 +151,6 @@ func TestProxy_LegacyBodyAPIKey_MasterKey_StripsFieldAndUsesPoolKey(t *testing.T
 func TestProxy_LegacyQueryAPIKey_MasterKey_StripsParamAndUsesPoolKey(t *testing.T) {
 	t.Parallel()
 
-	gin.SetMode(gin.TestMode)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	const poolKey = "tvly-pool-1234567890abcdef"
@@ -204,5 +206,46 @@ func TestProxy_LegacyQueryAPIKey_MasterKey_StripsParamAndUsesPoolKey(t *testing.
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("unexpected status: got %d want %d (body=%q)", w.Code, http.StatusOK, w.Body.String())
+	}
+}
+
+func TestProxyRejectsOversizedBodyBeforeAuthentication(t *testing.T) {
+	t.Parallel()
+
+	router := NewRouter(Dependencies{})
+	req := httptest.NewRequest(http.MethodPost, "/search", bytes.NewReader(make([]byte, maxProxyRequestBody+1)))
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
+func TestLegacyQueryCredentialIsRedactedBeforeLogging(t *testing.T) {
+	var logs bytes.Buffer
+	previousWriter := gin.DefaultWriter
+	gin.DefaultWriter = &logs
+	t.Cleanup(func() { gin.DefaultWriter = previousWriter })
+
+	router := gin.New()
+	router.Use(sanitizeLegacyAPIKeyQuery(), gin.Logger())
+	router.GET("/usage", func(c *gin.Context) {
+		if got := c.GetString(legacyAPIKeyContextKey); got != "secret" {
+			t.Fatalf("credential = %q, want secret", got)
+		}
+		c.Status(http.StatusNoContent)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/usage?api_key=secret&foo=bar", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if strings.Contains(logs.String(), "secret") {
+		t.Fatalf("access log leaked credential: %s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "foo=bar") {
+		t.Fatalf("sanitized query missing from access log: %s", logs.String())
 	}
 }

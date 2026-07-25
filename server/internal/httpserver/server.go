@@ -3,6 +3,7 @@ package httpserver
 import (
 	"embed"
 	"net/http"
+	"time"
 
 	"tavily-proxy/server/internal/config"
 	"tavily-proxy/server/internal/services"
@@ -28,7 +29,10 @@ type Dependencies struct {
 func New(deps Dependencies) *http.Server {
 	handler := NewRouter(deps)
 	return &http.Server{
-		Addr:    deps.Config.ListenAddr,
-		Handler: handler,
+		Addr:              deps.Config.ListenAddr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
 	}
 }

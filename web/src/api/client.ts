@@ -34,6 +34,11 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error?.response?.status === 401) {
+      const sentAuthorization = error.config?.headers?.get?.('Authorization')
+        ?? error.config?.headers?.Authorization
+      if (sentAuthorization && sentAuthorization !== `Bearer ${getMasterKey()}`) {
+        return Promise.reject(error)
+      }
       clearMasterKey()
       window.dispatchEvent(new Event('auth-required'))
     }

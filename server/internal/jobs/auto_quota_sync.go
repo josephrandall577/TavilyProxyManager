@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync/atomic"
 	"time"
@@ -81,6 +82,12 @@ func StartAutoQuotaSync(ctx context.Context, settings *services.SettingsService,
 					if err != nil {
 						_ = settings.Set(context.Background(), services.SettingAutoSyncLastError, err.Error())
 						logger.Error("auto-sync: sync failed", "err", err)
+						return
+					}
+					if result.Failed > 0 {
+						err := fmt.Sprintf("quota sync failed for %d of %d keys", result.Failed, result.Total)
+						_ = settings.Set(context.Background(), services.SettingAutoSyncLastError, err)
+						logger.Error("auto-sync: partial failure", "failed", result.Failed, "total", result.Total)
 						return
 					}
 

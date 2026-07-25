@@ -317,6 +317,7 @@ const syncJobPercent = computed(() => {
 });
 
 let syncJobPoll: number | null = null;
+let syncJobRequest = 0;
 
 function startSyncJobPolling(): void {
   if (syncJobPoll != null) return;
@@ -397,9 +398,11 @@ async function refresh() {
 }
 
 async function loadSyncJob(): Promise<void> {
+  const request = ++syncJobRequest;
   try {
     const prev = syncJob.value;
     const { data } = await api.get<SyncJob>("/api/keys/sync");
+    if (request !== syncJobRequest) return;
     syncJob.value = data;
 
     if (data.status === "running") {
@@ -429,6 +432,7 @@ async function loadSyncJob(): Promise<void> {
 
     message.error(data.error ?? t("keys.errors.syncAllFailed"));
   } catch (err: any) {
+    if (request !== syncJobRequest) return;
     stopSyncJobPolling();
     message.error(err?.response?.data?.error ?? t("keys.errors.syncAllFailed"));
   }
@@ -894,7 +898,10 @@ onMounted(async () => {
   await loadSyncJob();
 });
 
-onBeforeUnmount(stopSyncJobPolling);
+onBeforeUnmount(() => {
+  syncJobRequest += 1;
+  stopSyncJobPolling();
+});
 </script>
 
 <style scoped>

@@ -215,7 +215,11 @@ func (s *QuotaSyncService) syncKey(ctx context.Context, key models.APIKey) Quota
 		usage = totalQuota
 	}
 
-	_ = s.keys.SetUsage(ctx, key.ID, usage, &totalQuota)
+	if err := s.keys.SetUsage(ctx, key.ID, usage, &totalQuota); err != nil {
+		item.Status = "error"
+		item.Error = err.Error()
+		return item
+	}
 
 	item.Status = "ok"
 	item.UsedQuota = usage

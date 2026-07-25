@@ -214,6 +214,7 @@ const statusCounts = ref<LogStatusCount[]>([]);
 const statusLoading = ref(false);
 const showDetail = ref(false);
 const selected = ref<LogItem | null>(null);
+let logsRequest = 0;
 
 const statusOptions = computed<SelectOption[]>(() => [
   { label: t("logs.filter.allStatusCodes"), value: "all" },
@@ -250,6 +251,7 @@ function formatLogTime(value: string): string {
 }
 
 async function refreshLogs() {
+  const request = ++logsRequest;
   loading.value = true;
   try {
     const params: Record<string, any> = {
@@ -265,12 +267,14 @@ async function refreshLogs() {
         params,
       },
     );
+    if (request !== logsRequest) return;
     items.value = data.items;
     total.value = data.total;
   } catch (err: any) {
+    if (request !== logsRequest) return;
     message.error(err?.response?.data?.error ?? t("logs.errors.loadLogs"));
   } finally {
-    loading.value = false;
+    if (request === logsRequest) loading.value = false;
   }
 }
 

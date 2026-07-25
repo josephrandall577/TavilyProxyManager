@@ -70,28 +70,30 @@ func (s *KeyService) Update(ctx context.Context, id uint, upd KeyUpdate) (*model
 	if err := s.db.WithContext(ctx).First(&key, id).Error; err != nil {
 		return nil, err
 	}
+	updates := map[string]any{}
 	if upd.Alias != nil {
-		key.Alias = *upd.Alias
+		updates["alias"] = *upd.Alias
 	}
 	if upd.TotalQuota != nil && *upd.TotalQuota > 0 {
-		key.TotalQuota = *upd.TotalQuota
+		updates["total_quota"] = *upd.TotalQuota
 	}
 	if upd.UsedQuota != nil && *upd.UsedQuota >= 0 {
-		key.UsedQuota = *upd.UsedQuota
+		updates["used_quota"] = *upd.UsedQuota
 	}
 	if upd.IsActive != nil {
-		if key.IsInvalid && *upd.IsActive {
-			key.IsActive = false
-		} else {
-			key.IsActive = *upd.IsActive
-		}
+		updates["is_active"] = gorm.Expr("CASE WHEN is_invalid THEN ? ELSE ? END", false, *upd.IsActive)
 	}
 	if upd.ResetQuota {
-		key.UsedQuota = 0
+		updates["used_quota"] = 0
 	}
 
-	if err := s.db.WithContext(ctx).Save(&key).Error; err != nil {
-		return nil, err
+	if len(updates) > 0 {
+		if err := s.db.WithContext(ctx).Model(&models.APIKey{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+			return nil, err
+		}
+		if err := s.db.WithContext(ctx).First(&key, id).Error; err != nil {
+			return nil, err
+		}
 	}
 	return &key, nil
 }
@@ -126,7 +128,7 @@ func (s *KeyService) IncrementUsed(ctx context.Context, id uint) error {
 }
 
 func (s *KeyService) ResetAllUsage(ctx context.Context) error {
-	return s.db.WithContext(ctx).Model(&models.APIKey{}).Update("used_quota", 0).Error
+	return s.db.WithContext(ctx).Model(&models.APIKey{}).Where("1 = 1").Update("used_quota", 0).Error
 }
 
 func (s *KeyService) SetUsage(ctx context.Context, id uint, used int, total *int) error {

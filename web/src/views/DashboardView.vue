@@ -196,6 +196,7 @@ const granularity = ref<"hour" | "day" | "month">("hour");
 
 const chartEl = ref<HTMLDivElement | null>(null);
 let chart: echarts.ECharts | null = null;
+let timeSeriesRequest = 0;
 
 const usagePercent = computed(() => {
   if (!stats.value) return 0;
@@ -222,17 +223,20 @@ async function refreshStats() {
 }
 
 async function refreshTimeSeries() {
+  const request = ++timeSeriesRequest;
   loadingChart.value = true;
   try {
     const { data } = await api.get<TimeSeries>("/api/stats/timeseries", {
       params: { granularity: granularity.value },
     });
+    if (request !== timeSeriesRequest) return;
     timeseries.value = data;
     renderChart();
   } catch (err: any) {
+    if (request !== timeSeriesRequest) return;
     message.error(err?.response?.data?.error ?? t("dashboard.errors.loadChart"));
   } finally {
-    loadingChart.value = false;
+    if (request === timeSeriesRequest) loadingChart.value = false;
   }
 }
 
@@ -298,7 +302,6 @@ function renderChart() {
         return {
           name: localizeSeriesName(s.name),
           type: "bar",
-          stack: "total",
           barWidth: "60%",
           itemStyle: {
             color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
@@ -348,6 +351,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  timeSeriesRequest += 1;
   window.removeEventListener("resize", onResize);
   chart?.dispose();
   chart = null;

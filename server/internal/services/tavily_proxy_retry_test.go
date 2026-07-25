@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -157,6 +158,31 @@ func TestTavilyProxy_AllTooManyRequestsReturns429AndKeepsKeysAvailable(t *testin
 	}
 	if len(candidates) != 2 {
 		t.Fatalf("unexpected candidate count: got %d want %d", len(candidates), 2)
+	}
+}
+
+func TestTavilyProxy_TransportFailureReturnsUpstreamErrorWithinTotalBudget(t *testing.T) {
+	t.Parallel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(upstream.Close)
+
+	ctx, keys, proxy := newTavilyProxyTestDeps(t, upstream.URL)
+	proxy.client.Timeout = 50 * time.Millisecond
+	for _, key := range []string{"tvly-timeout-a", "tvly-timeout-b"} {
+		if _, err := keys.Create(ctx, key, "", 1000); err != nil {
+			t.Fatalf("create key: %v", err)
+		}
+	}
+
+	_, err := proxy.Do(ctx, ProxyRequest{Method: http.MethodGet, Path: "/usage"})
+	if err == nil {
+		t.Fatal("expected transport error")
+	}
+	if errors.Is(err, ErrNoAvailableKeys) {
+		t.Fatalf("transport error reported as empty key pool: %v", err)
 	}
 }
 

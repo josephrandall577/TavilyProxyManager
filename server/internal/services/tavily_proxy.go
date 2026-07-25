@@ -184,6 +184,12 @@ func (p *TavilyProxy) Do(ctx context.Context, req ProxyRequest) (ProxyResponse, 
 		}
 		return ProxyResponse{}, ErrNoAvailableKeys
 	}
+	attemptCtx := ctx
+	if p.client.Timeout > 0 {
+		var cancel context.CancelFunc
+		attemptCtx, cancel = context.WithTimeout(ctx, p.client.Timeout)
+		defer cancel()
+	}
 
 	var lastErr error
 	var lastRateLimitedResp ProxyResponse
@@ -192,7 +198,7 @@ func (p *TavilyProxy) Do(ctx context.Context, req ProxyRequest) (ProxyResponse, 
 	var lastRateLimitedKeyAlias string
 	var lastRateLimitedLatency int64
 	for _, key := range candidates {
-		resp, status, latencyMs, tavilyReqID, err := p.tryKey(ctx, key.ID, key.Key, req, proxyReqID)
+		resp, status, latencyMs, tavilyReqID, err := p.tryKey(attemptCtx, key.ID, key.Key, req, proxyReqID)
 
 		if err != nil {
 			p.logger.Warn("upstream request failed",
@@ -376,6 +382,9 @@ func (p *TavilyProxy) Do(ctx context.Context, req ProxyRequest) (ProxyResponse, 
 		)
 	}
 
+	if lastErr != nil {
+		return ProxyResponse{}, lastErr
+	}
 	return ProxyResponse{}, ErrNoAvailableKeys
 }
 

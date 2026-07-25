@@ -197,33 +197,31 @@ func (s *StatsService) RecordRequest(ctx context.Context, endpoint string, occur
 	month := time.Date(occurredAt.Year(), occurredAt.Month(), 1, 0, 0, 0, 0, loc)
 
 	updatedAt := time.Now()
-
-	if err := s.upsertIncrement(ctx, "hour", hour.Format("2006-01-02 15:00"), "", 1, updatedAt); err != nil {
-		return err
-	}
-	if err := s.upsertIncrement(ctx, "day", day.Format("2006-01-02"), "", 1, updatedAt); err != nil {
-		return err
-	}
-	if err := s.upsertIncrement(ctx, "month", month.Format("2006-01"), "", 1, updatedAt); err != nil {
-		return err
-	}
-
-	if endpoint == "/search" {
-		if err := s.upsertIncrement(ctx, "hour", hour.Format("2006-01-02 15:00"), "/search", 1, updatedAt); err != nil {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := upsertIncrement(tx, "hour", hour.Format("2006-01-02 15:00"), "", 1, updatedAt); err != nil {
 			return err
 		}
-		if err := s.upsertIncrement(ctx, "day", day.Format("2006-01-02"), "/search", 1, updatedAt); err != nil {
+		if err := upsertIncrement(tx, "day", day.Format("2006-01-02"), "", 1, updatedAt); err != nil {
 			return err
 		}
-		if err := s.upsertIncrement(ctx, "month", month.Format("2006-01"), "/search", 1, updatedAt); err != nil {
+		if err := upsertIncrement(tx, "month", month.Format("2006-01"), "", 1, updatedAt); err != nil {
 			return err
 		}
-	}
 
-	return nil
+		if endpoint != "/search" {
+			return nil
+		}
+		if err := upsertIncrement(tx, "hour", hour.Format("2006-01-02 15:00"), "/search", 1, updatedAt); err != nil {
+			return err
+		}
+		if err := upsertIncrement(tx, "day", day.Format("2006-01-02"), "/search", 1, updatedAt); err != nil {
+			return err
+		}
+		return upsertIncrement(tx, "month", month.Format("2006-01"), "/search", 1, updatedAt)
+	})
 }
 
-func (s *StatsService) upsertIncrement(ctx context.Context, granularity, bucket, endpoint string, inc int64, updatedAt time.Time) error {
+func upsertIncrement(db *gorm.DB, granularity, bucket, endpoint string, inc int64, updatedAt time.Time) error {
 	stat := models.RequestStat{
 		Granularity: granularity,
 		Bucket:      bucket,
@@ -231,7 +229,7 @@ func (s *StatsService) upsertIncrement(ctx context.Context, granularity, bucket,
 		Count:       inc,
 		UpdatedAt:   updatedAt,
 	}
-	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
+	return db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "granularity"}, {Name: "bucket"}, {Name: "endpoint"}},
 		DoUpdates: clause.Assignments(map[string]any{
 			"count":      gorm.Expr("count + ?", inc),

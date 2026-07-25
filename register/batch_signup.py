@@ -4,6 +4,7 @@ Tavily 批量注册
 """
 import argparse
 import os
+import secrets
 import time
 from datetime import datetime
 from typing import Iterable
@@ -23,7 +24,7 @@ from signup import (
 OUTPUT_FILE = "api_keys.txt"
 FAILED_FILE = "failed.txt"
 BANNED_DOMAINS_FILE = "banned_domains.txt"
-PASSWORD = "Tavily@2024Test"
+PASSWORD = secrets.token_urlsafe(24)
 
 # 注册间隔（秒），避免被限制
 REGISTER_INTERVAL = 5

@@ -20,9 +20,12 @@ import (
 	"tavily-proxy/server/internal/util"
 )
 
+const maxProxyRequestBody = 10 << 20
+const legacyAPIKeyContextKey = "legacy_api_key"
+
 func NewRouter(deps Dependencies) http.Handler {
 	r := gin.New()
-	r.Use(gin.Logger(), gin.Recovery())
+	r.Use(sanitizeLegacyAPIKeyQuery(), gin.Logger(), gin.Recovery())
 
 	publicFS, _ := fs.Sub(deps.EmbeddedPublic, "public")
 
@@ -91,14 +94,26 @@ func NewRouter(deps Dependencies) http.Handler {
 			return
 		}
 
-		body, _ := io.ReadAll(c.Request.Body)
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxProxyRequestBody)
+		body, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request_too_large"})
+				return
+			}
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request_body"})
+			return
+		}
 
 		authHeaderToken := parseBearerToken(c.GetHeader("Authorization"))
-		apiKeyFromQuery, sanitizedQuery := stripAPIKeyFromRawQuery(c.Request.URL.RawQuery)
+		apiKeyFromQuery, _ := c.Get(legacyAPIKeyContextKey)
+		queryCredential, _ := apiKeyFromQuery.(string)
+		sanitizedQuery := c.Request.URL.RawQuery
 		apiKeyFromBody, sanitizedBody := stripAPIKeyFromJSON(body)
 
-		hasCredential := authHeaderToken != "" || apiKeyFromBody != "" || apiKeyFromQuery != ""
-		if deps.MasterKeyService.Authenticate(authHeaderToken) || deps.MasterKeyService.Authenticate(apiKeyFromBody) || deps.MasterKeyService.Authenticate(apiKeyFromQuery) {
+		hasCredential := authHeaderToken != "" || apiKeyFromBody != "" || queryCredential != ""
+		if deps.MasterKeyService.Authenticate(authHeaderToken) || deps.MasterKeyService.Authenticate(apiKeyFromBody) || deps.MasterKeyService.Authenticate(queryCredential) {
 			handleProxy(c, deps.TavilyProxy, sanitizedBody, sanitizedQuery)
 			return
 		}
@@ -119,6 +134,17 @@ func NewRouter(deps Dependencies) http.Handler {
 	})
 
 	return r
+}
+
+func sanitizeLegacyAPIKeyQuery() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		apiKey, sanitized := stripAPIKeyFromRawQuery(c.Request.URL.RawQuery)
+		if apiKey != "" {
+			c.Set(legacyAPIKeyContextKey, apiKey)
+			c.Request.URL.RawQuery = sanitized
+		}
+		c.Next()
+	}
 }
 
 func masterAuthMiddleware(master *services.MasterKeyService) gin.HandlerFunc {

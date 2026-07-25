@@ -232,6 +232,7 @@ const draftKey = ref("");
 const needsKey = computed(() => !getMasterKey());
 const authError = ref("");
 const dashboardRefreshNonce = ref(0);
+let keySubmission = 0;
 
 async function verifyKey() {
   try {
@@ -243,9 +244,11 @@ async function verifyKey() {
 }
 
 async function saveKey(value: string) {
+  const submission = ++keySubmission;
   authError.value = "";
   setMasterKey(value);
   const ok = await verifyKey();
+  if (submission !== keySubmission) return;
   if (!ok) {
     clearMasterKey();
     draftKey.value = value;
@@ -257,6 +260,7 @@ async function saveKey(value: string) {
 }
 
 function logout() {
+  keySubmission += 1;
   clearMasterKey();
   draftKey.value = "";
   authError.value = "";
