@@ -126,11 +126,11 @@ docker buildx create --use
 docker buildx build --load -t my-tavily-proxy .
 ```
 
-构建并推送多架构镜像（`amd64` + `arm64`）：
+构建并推送 `linux/amd64` 镜像：
 
 ```bash
 docker buildx build \
-  --platform linux/amd64,linux/arm64 \
+  --platform linux/amd64 \
   -t ghcr.io/josephrandall577/tavilyproxymanager:latest \
   --push .
 ```

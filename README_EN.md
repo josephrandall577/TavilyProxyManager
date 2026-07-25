@@ -126,11 +126,11 @@ Build locally (current host architecture):
 docker buildx build --load -t my-tavily-proxy .
 ```
 
-Build and push multi-arch image (`amd64` + `arm64`):
+Build and push the `linux/amd64` image:
 
 ```bash
 docker buildx build \
-  --platform linux/amd64,linux/arm64 \
+  --platform linux/amd64 \
   -t ghcr.io/<owner>/<repo>:latest \
   --push .
 ```
