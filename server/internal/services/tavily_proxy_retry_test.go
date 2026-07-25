@@ -320,6 +320,43 @@ func TestTavilyProxy_StreamErrorStillAccountsAcceptedRequest(t *testing.T) {
 	}
 }
 
+func TestTavilyProxy_CanceledStreamStillAccountsAcceptedRequest(t *testing.T) {
+	t.Parallel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: accepted\n\n"))
+	}))
+	t.Cleanup(upstream.Close)
+
+	_, keys, proxy := newTavilyProxyTestDeps(t, upstream.URL)
+	key, err := keys.Create(context.Background(), "tvly-stream", "", 1000)
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err = proxy.Do(ctx, ProxyRequest{
+		Method: http.MethodPost,
+		Path:   "/research",
+		Stream: func(ProxyStreamResponse) error {
+			cancel()
+			return context.Canceled
+		},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("proxy error = %v, want %v", err, context.Canceled)
+	}
+	got, err := keys.Get(context.Background(), key.ID)
+	if err != nil {
+		t.Fatalf("get key: %v", err)
+	}
+	if got.UsedQuota != 1 {
+		t.Fatalf("used quota = %d, want 1", got.UsedQuota)
+	}
+}
+
 func TestTavilyProxy_ResearchCreateTransportErrorDoesNotFailOver(t *testing.T) {
 	t.Parallel()
 
@@ -381,6 +418,84 @@ func TestTavilyProxy_ResearchStatusRetriesNotFoundWithNextKey(t *testing.T) {
 	}
 	if firstCalls != 1 || secondCalls != 1 {
 		t.Fatalf("unexpected calls: first=%d second=%d", firstCalls, secondCalls)
+	}
+}
+
+func TestTavilyProxy_ResearchStatusPrefersOwnerRateLimitOverFallbackNotFound(t *testing.T) {
+	t.Parallel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch bearerToken(r) {
+		case "tvly-owner":
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"request_id":"owner-rate-limited"}`))
+		case "tvly-fallback":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"detail":"not found"}`))
+		default:
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	ctx, keys, proxy := newTavilyProxyTestDeps(t, upstream.URL)
+	if _, err := keys.Create(ctx, "tvly-fallback", "", 1000); err != nil {
+		t.Fatalf("create fallback key: %v", err)
+	}
+	owner, err := keys.Create(ctx, "tvly-owner", "", 1000)
+	if err != nil {
+		t.Fatalf("create owner key: %v", err)
+	}
+
+	resp, err := proxy.Do(ctx, ProxyRequest{
+		Method:         http.MethodGet,
+		Path:           "/research/research-1",
+		PreferredKeyID: owner.ID,
+	})
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusTooManyRequests)
+	}
+	if !strings.Contains(string(resp.Body), "owner-rate-limited") {
+		t.Fatalf("unexpected response body: %s", string(resp.Body))
+	}
+}
+
+func TestTavilyProxy_RequestTimeoutOverridesClientTimeout(t *testing.T) {
+	t.Parallel()
+
+	ctx, keys, proxy := newTavilyProxyTestDeps(t, "https://example.invalid")
+	if _, err := keys.Create(ctx, "tvly-research", "", 1000); err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	proxy.client.Timeout = 20 * time.Millisecond
+	proxy.client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		select {
+		case <-time.After(50 * time.Millisecond):
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": {"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+				Request:    req,
+			}, nil
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		}
+	})
+
+	resp, err := proxy.Do(ctx, ProxyRequest{
+		Method:  http.MethodPost,
+		Path:    "/research",
+		Body:    []byte(`{"input":"test"}`),
+		Timeout: 200 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 }
 
