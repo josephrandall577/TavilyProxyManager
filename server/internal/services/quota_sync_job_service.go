@@ -2,7 +2,6 @@ package services
 
 import (
 	"context"
-	"log/slog"
 	"sync"
 	"time"
 
@@ -29,16 +28,15 @@ type QuotaSyncJobStatus struct {
 }
 
 type QuotaSyncJobService struct {
-	keys   *KeyService
-	sync   *QuotaSyncService
-	logger *slog.Logger
+	keys *KeyService
+	sync *QuotaSyncService
 
 	mu  sync.RWMutex
 	job *QuotaSyncJobStatus
 }
 
-func NewQuotaSyncJobService(keys *KeyService, sync *QuotaSyncService, logger *slog.Logger) *QuotaSyncJobService {
-	return &QuotaSyncJobService{keys: keys, sync: sync, logger: logger}
+func NewQuotaSyncJobService(keys *KeyService, sync *QuotaSyncService) *QuotaSyncJobService {
+	return &QuotaSyncJobService{keys: keys, sync: sync}
 }
 
 func (s *QuotaSyncJobService) Get() QuotaSyncJobStatus {

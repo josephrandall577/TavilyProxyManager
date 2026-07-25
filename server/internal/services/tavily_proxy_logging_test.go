@@ -37,8 +37,8 @@ func TestTavilyProxy_DefaultLoggingEnabled_CreatesLogs(t *testing.T) {
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
 	settings := NewSettingsService(database)
-	keys := NewKeyService(database, logger)
-	logs := NewLogService(database, logger)
+	keys := NewKeyService(database)
+	logs := NewLogService(database)
 
 	ctx := context.Background()
 	if _, err := keys.Create(ctx, "tvly-test", "test", 1000); err != nil {
@@ -84,8 +84,8 @@ func TestTavilyProxy_LoggingDisabled_SkipsLogs(t *testing.T) {
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
 	settings := NewSettingsService(database)
-	keys := NewKeyService(database, logger)
-	logs := NewLogService(database, logger)
+	keys := NewKeyService(database)
+	logs := NewLogService(database)
 
 	ctx := context.Background()
 	if _, err := keys.Create(ctx, "tvly-test", "test", 1000); err != nil {

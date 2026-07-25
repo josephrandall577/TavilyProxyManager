@@ -3,8 +3,6 @@ package httpserver
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -20,8 +18,6 @@ import (
 func TestHandleListLogs_StatusCodeFilter(t *testing.T) {
 	t.Parallel()
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
 	database, err := db.Open(filepath.Join(t.TempDir(), "app.db"))
 	if err != nil {
 		t.Fatalf("db open: %v", err)
@@ -32,7 +28,7 @@ func TestHandleListLogs_StatusCodeFilter(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
-	logs := services.NewLogService(database, logger)
+	logs := services.NewLogService(database)
 	ctx := context.Background()
 
 	if err := logs.Create(ctx, &models.RequestLog{RequestID: "a", Endpoint: "/search", StatusCode: 200, ClientIP: "127.0.0.1"}); err != nil {
@@ -75,8 +71,6 @@ func TestHandleListLogs_StatusCodeFilter(t *testing.T) {
 func TestHandleListLogs_InvalidStatusCode(t *testing.T) {
 	t.Parallel()
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
 	database, err := db.Open(filepath.Join(t.TempDir(), "app.db"))
 	if err != nil {
 		t.Fatalf("db open: %v", err)
@@ -87,7 +81,7 @@ func TestHandleListLogs_InvalidStatusCode(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
-	logs := services.NewLogService(database, logger)
+	logs := services.NewLogService(database)
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -111,8 +105,6 @@ func TestHandleListLogs_InvalidStatusCode(t *testing.T) {
 func TestHandleLogStatusCodes_ReturnsCounts(t *testing.T) {
 	t.Parallel()
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
 	database, err := db.Open(filepath.Join(t.TempDir(), "app.db"))
 	if err != nil {
 		t.Fatalf("db open: %v", err)
@@ -123,7 +115,7 @@ func TestHandleLogStatusCodes_ReturnsCounts(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
-	logs := services.NewLogService(database, logger)
+	logs := services.NewLogService(database)
 	ctx := context.Background()
 
 	if err := logs.Create(ctx, &models.RequestLog{RequestID: "a", Endpoint: "/search", StatusCode: 200, ClientIP: "127.0.0.1"}); err != nil {

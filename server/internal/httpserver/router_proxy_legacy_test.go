@@ -55,7 +55,7 @@ func TestProxy_LegacyBodyAPIKey_TavilyKey_IsUnauthorized(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	keys := services.NewKeyService(database, logger)
+	keys := services.NewKeyService(database)
 	if _, err := keys.Create(ctx, poolKey, "pool", 1000); err != nil {
 		t.Fatalf("create key: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestProxy_LegacyBodyAPIKey_MasterKey_StripsFieldAndUsesPoolKey(t *testing.T
 		t.Fatalf("master key init: %v", err)
 	}
 
-	keys := services.NewKeyService(database, logger)
+	keys := services.NewKeyService(database)
 	if _, err := keys.Create(ctx, poolKey, "pool", 1000); err != nil {
 		t.Fatalf("create key: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestProxy_LegacyQueryAPIKey_MasterKey_StripsParamAndUsesPoolKey(t *testing.
 		t.Fatalf("master key init: %v", err)
 	}
 
-	keys := services.NewKeyService(database, logger)
+	keys := services.NewKeyService(database)
 	if _, err := keys.Create(ctx, poolKey, "pool", 1000); err != nil {
 		t.Fatalf("create key: %v", err)
 	}

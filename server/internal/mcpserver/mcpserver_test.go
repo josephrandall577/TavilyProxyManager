@@ -39,7 +39,7 @@ func TestTavilyUsage_ReturnsAggregatedStatsWithoutUpstreamCall(t *testing.T) {
 		t.Fatalf("master key init: %v", err)
 	}
 
-	keys := services.NewKeyService(database, logger)
+	keys := services.NewKeyService(database)
 	keyA, err := keys.Create(ctx, "tvly-pool-a", "a", 1000)
 	if err != nil {
 		t.Fatalf("create key a: %v", err)
@@ -289,4 +289,3 @@ func asInt64(t *testing.T, v any) int64 {
 		return 0
 	}
 }
-

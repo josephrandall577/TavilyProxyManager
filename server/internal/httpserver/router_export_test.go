@@ -2,8 +2,6 @@ package httpserver
 
 import (
 	"context"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -19,8 +17,6 @@ import (
 func TestHandleExportKeys_ExcludesInvalidKeys(t *testing.T) {
 	t.Parallel()
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
 	database, err := db.Open(filepath.Join(t.TempDir(), "app.db"))
 	if err != nil {
 		t.Fatalf("db open: %v", err)
@@ -31,7 +27,7 @@ func TestHandleExportKeys_ExcludesInvalidKeys(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
-	keys := services.NewKeyService(database, logger)
+	keys := services.NewKeyService(database)
 	ctx := context.Background()
 
 	active, err := keys.Create(ctx, "tvly-active", "active", 1000)

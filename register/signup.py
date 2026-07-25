@@ -153,10 +153,6 @@ def svg_to_png_base64(svg_base64: str) -> str | None:
             except Exception:
                 pass
 
-    # 如果没有可用的转换库，返回None
-    return None
-
-
 def get_signup_page(session: requests.Session, return_to: str = "/home") -> dict:
     """
     获取注册页面URL和相关信息
@@ -1871,5 +1867,4 @@ def signup(
                     pass
 
     return result
-
 

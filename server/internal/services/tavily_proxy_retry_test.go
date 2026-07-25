@@ -30,7 +30,7 @@ func newTavilyProxyTestDeps(t *testing.T, upstreamURL string) (context.Context, 
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
-	keys := NewKeyService(database, logger)
+	keys := NewKeyService(database)
 	proxy := NewTavilyProxy(upstreamURL, 5*time.Second, keys, nil, nil, logger)
 	return context.Background(), keys, proxy
 }

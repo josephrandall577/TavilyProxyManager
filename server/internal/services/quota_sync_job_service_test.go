@@ -40,10 +40,10 @@ func TestQuotaSyncJobService_RunsInBackgroundAndReportsProgress(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
-	keys := NewKeyService(database, logger)
+	keys := NewKeyService(database)
 	proxy := NewTavilyProxy(upstream.URL, 5*time.Second, keys, nil, nil, logger)
 	sync := NewQuotaSyncService(keys, proxy, logger)
-	jobs := NewQuotaSyncJobService(keys, sync, logger)
+	jobs := NewQuotaSyncJobService(keys, sync)
 
 	ctx := context.Background()
 	for i := 0; i < 3; i++ {

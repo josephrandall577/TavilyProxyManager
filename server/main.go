@@ -61,8 +61,8 @@ func main() {
 	}
 
 	settingsService := services.NewSettingsService(database)
-	keyService := services.NewKeyService(database, slogLogger)
-	logService := services.NewLogService(database, slogLogger)
+	keyService := services.NewKeyService(database)
+	logService := services.NewLogService(database)
 	statsService := services.NewStatsService(database)
 
 	if err := statsService.BackfillFromLogsIfEmpty(context.Background()); err != nil {
@@ -71,10 +71,10 @@ func main() {
 
 	tavilyProxy := services.NewTavilyProxy(cfg.TavilyBaseURL, cfg.UpstreamTimeout, keyService, logService, statsService, slogLogger).
 		WithSettings(settingsService)
-	cacheService := services.NewCacheService(database, slogLogger)
+	cacheService := services.NewCacheService(database)
 	tavilyProxy.WithCache(cacheService)
 	quotaSyncService := services.NewQuotaSyncService(keyService, tavilyProxy, slogLogger)
-	quotaSyncJob := services.NewQuotaSyncJobService(keyService, quotaSyncService, slogLogger)
+	quotaSyncJob := services.NewQuotaSyncJobService(keyService, quotaSyncService)
 
 	srv := httpserver.New(httpserver.Dependencies{
 		Config:           cfg,

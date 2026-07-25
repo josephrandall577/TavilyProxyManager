@@ -30,4 +30,3 @@ func StartMonthlyReset(ctx context.Context, keys *services.KeyService, logger *s
 		}
 	}()
 }
-

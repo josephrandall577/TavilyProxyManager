@@ -2,7 +2,6 @@ package services
 
 import (
 	"context"
-	"log/slog"
 	"time"
 
 	"tavily-proxy/server/internal/models"
@@ -11,12 +10,11 @@ import (
 )
 
 type LogService struct {
-	db     *gorm.DB
-	logger *slog.Logger
+	db *gorm.DB
 }
 
-func NewLogService(db *gorm.DB, logger *slog.Logger) *LogService {
-	return &LogService{db: db, logger: logger}
+func NewLogService(db *gorm.DB) *LogService {
+	return &LogService{db: db}
 }
 
 func (s *LogService) Create(ctx context.Context, entry *models.RequestLog) error {

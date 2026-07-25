@@ -41,7 +41,7 @@ func TestQuotaSyncService_SyncOne_TooManyRequestsDoesNotMarkExhausted(t *testing
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
-	keys := NewKeyService(database, logger)
+	keys := NewKeyService(database)
 	proxy := NewTavilyProxy(upstream.URL, 5*time.Second, keys, nil, nil, logger)
 	sync := NewQuotaSyncService(keys, proxy, logger)
 
@@ -102,7 +102,7 @@ func TestQuotaSyncService_SyncOne_ExhaustedStatusMarksExhausted(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
-	keys := NewKeyService(database, logger)
+	keys := NewKeyService(database)
 	proxy := NewTavilyProxy(upstream.URL, 5*time.Second, keys, nil, nil, logger)
 	sync := NewQuotaSyncService(keys, proxy, logger)
 
@@ -155,7 +155,7 @@ func TestQuotaSyncService_SyncOne_UnauthorizedMarksInvalid(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
-	keys := NewKeyService(database, logger)
+	keys := NewKeyService(database)
 	proxy := NewTavilyProxy(upstream.URL, 5*time.Second, keys, nil, nil, logger)
 	sync := NewQuotaSyncService(keys, proxy, logger)
 
@@ -231,7 +231,7 @@ func TestQuotaSyncService_SyncAllWithConcurrency_LimitsConcurrency(t *testing.T)
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
-	keys := NewKeyService(database, logger)
+	keys := NewKeyService(database)
 	proxy := NewTavilyProxy(upstream.URL, 5*time.Second, keys, nil, nil, logger)
 	sync := NewQuotaSyncService(keys, proxy, logger)
 
@@ -279,7 +279,7 @@ func TestQuotaSyncService_SyncAllWithConcurrencyAndInterval_RespectsInterval(t *
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
-	keys := NewKeyService(database, logger)
+	keys := NewKeyService(database)
 	proxy := NewTavilyProxy(upstream.URL, 5*time.Second, keys, nil, nil, logger)
 	sync := NewQuotaSyncService(keys, proxy, logger)
 

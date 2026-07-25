@@ -23,7 +23,12 @@
           </template>
           {{ t("keys.tooltip.delayBetweenUsage") }}
         </n-tooltip>
-        <n-button :loading="syncAllBusy" :disabled="syncAllBusy" @click="syncAll" secondary>
+        <n-button
+          :loading="syncAllBusy"
+          :disabled="syncAllBusy"
+          @click="syncAll"
+          secondary
+        >
           <template #icon>
             <n-icon :component="SyncOutline" />
           </template>
@@ -128,9 +133,9 @@
       <template #footer>
         <n-space justify="end">
           <n-button @click="showAdd = false">{{ t("common.cancel") }}</n-button>
-          <n-button type="primary" :loading="saving" @click="createKey"
-            >{{ t("keys.addModal.createKey") }}</n-button
-          >
+          <n-button type="primary" :loading="saving" @click="createKey">{{
+            t("keys.addModal.createKey")
+          }}</n-button>
         </n-space>
       </template>
     </n-modal>
@@ -159,7 +164,9 @@
           class="batch-error"
         >
           <div>
-            {{ t("keys.batchModal.failedHeader", { count: batchFailures.length }) }}
+            {{
+              t("keys.batchModal.failedHeader", { count: batchFailures.length })
+            }}
           </div>
           <div class="batch-error-list">
             <div
@@ -177,9 +184,9 @@
       </n-space>
       <template #footer>
         <n-space justify="end">
-          <n-button :disabled="batchSaving" @click="closeBatchAdd"
-            >{{ t("common.cancel") }}</n-button
-          >
+          <n-button :disabled="batchSaving" @click="closeBatchAdd">{{
+            t("common.cancel")
+          }}</n-button>
           <n-button
             type="primary"
             :loading="batchSaving"
@@ -220,7 +227,10 @@
         </n-grid>
         <n-form-item :label="t('keys.editModal.status')">
           <n-space align="center">
-            <n-switch v-model:value="editForm.is_active" :disabled="editIsInvalid" />
+            <n-switch
+              v-model:value="editForm.is_active"
+              :disabled="editIsInvalid"
+            />
             <span>{{
               editIsInvalid
                 ? t("keys.status.invalid")
@@ -233,10 +243,12 @@
       </n-form>
       <template #footer>
         <n-space justify="end">
-          <n-button @click="showEdit = false">{{ t("common.cancel") }}</n-button>
-          <n-button type="primary" :loading="saving" @click="saveEdit"
-            >{{ t("keys.editModal.saveChanges") }}</n-button
-          >
+          <n-button @click="showEdit = false">{{
+            t("common.cancel")
+          }}</n-button>
+          <n-button type="primary" :loading="saving" @click="saveEdit">{{
+            t("keys.editModal.saveChanges")
+          }}</n-button>
         </n-space>
       </template>
     </n-modal>
@@ -244,7 +256,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import {
+  computed,
+  h,
+  onBeforeUnmount,
+  onMounted,
+  reactive,
+  ref,
+  watch,
+} from "vue";
 import {
   NAlert,
   NButton,
@@ -290,7 +310,7 @@ const syncStarting = ref(false);
 const deletingInvalid = ref(false);
 const syncingUsageIds = ref(new Set<number>());
 const invalidCount = computed(
-  () => items.value.filter((item) => item.is_invalid).length
+  () => items.value.filter((item) => item.is_invalid).length,
 );
 
 type SyncJob = {
@@ -318,6 +338,7 @@ const syncJobPercent = computed(() => {
 
 let syncJobPoll: number | null = null;
 let syncJobRequest = 0;
+let syncJobLoading = false;
 
 function startSyncJobPolling(): void {
   if (syncJobPoll != null) return;
@@ -340,13 +361,15 @@ function normalizeIntervalSeconds(value: unknown): number {
 }
 
 const syncIntervalSeconds = ref<number>(
-  normalizeIntervalSeconds(localStorage.getItem(SYNC_INTERVAL_SECONDS_STORAGE_KEY))
+  normalizeIntervalSeconds(
+    localStorage.getItem(SYNC_INTERVAL_SECONDS_STORAGE_KEY),
+  ),
 );
 
 watch(syncIntervalSeconds, (value) => {
   localStorage.setItem(
     SYNC_INTERVAL_SECONDS_STORAGE_KEY,
-    String(normalizeIntervalSeconds(value))
+    String(normalizeIntervalSeconds(value)),
   );
 });
 
@@ -398,7 +421,9 @@ async function refresh() {
 }
 
 async function loadSyncJob(): Promise<void> {
+  if (syncJobLoading) return;
   const request = ++syncJobRequest;
+  syncJobLoading = true;
   try {
     const prev = syncJob.value;
     const { data } = await api.get<SyncJob>("/api/keys/sync");
@@ -425,7 +450,7 @@ async function loadSyncJob(): Promise<void> {
           succeeded: data.succeeded ?? 0,
           total: data.total ?? 0,
           failed: data.failed ?? 0,
-        })
+        }),
       );
       return;
     }
@@ -435,6 +460,8 @@ async function loadSyncJob(): Promise<void> {
     if (request !== syncJobRequest) return;
     stopSyncJobPolling();
     message.error(err?.response?.data?.error ?? t("keys.errors.syncAllFailed"));
+  } finally {
+    syncJobLoading = false;
   }
 }
 
@@ -446,6 +473,7 @@ async function syncAll() {
     const { data } = await api.post<SyncJob>("/api/keys/sync", {
       interval_ms: intervalSeconds * 1000,
     });
+    syncJobRequest += 1;
     syncJob.value = data;
     message.success(t("keys.messages.syncAllStarted"));
     startSyncJobPolling();
@@ -535,7 +563,10 @@ async function createBatchKeys() {
   let succeeded = 0;
   for (const item of keys) {
     try {
-      await api.post("/api/keys", { key: item.key, alias: item.alias || undefined });
+      await api.post("/api/keys", {
+        key: item.key,
+        alias: item.alias || undefined,
+      });
       succeeded++;
     } catch (err: any) {
       batchFailures.value.push({
@@ -560,7 +591,7 @@ async function createBatchKeys() {
       succeeded,
       total: keys.length,
       failed: batchFailures.value.length,
-    })
+    }),
   );
 }
 
@@ -637,7 +668,7 @@ async function deleteInvalidKeys() {
     message.success(t("keys.messages.deletedInvalid", { count: data.deleted }));
   } catch (err: any) {
     message.error(
-      err?.response?.data?.error ?? t("keys.errors.deleteInvalidFailed")
+      err?.response?.data?.error ?? t("keys.errors.deleteInvalidFailed"),
     );
   } finally {
     deletingInvalid.value = false;
@@ -675,7 +706,7 @@ async function exportKeys() {
     const date = new Date();
     const pad = (n: number) => String(n).padStart(2, "0");
     const filename = `tavily-keys-${date.getFullYear()}${pad(
-      date.getMonth() + 1
+      date.getMonth() + 1,
     )}${pad(date.getDate())}.txt`;
 
     const url = URL.createObjectURL(blob);
@@ -691,7 +722,7 @@ async function exportKeys() {
     message.success(
       t("keys.messages.exported", {
         count: Number.isFinite(exportedCount) ? exportedCount : 0,
-      })
+      }),
     );
   } catch {
     message.error(t("keys.errors.exportFailed"));
@@ -723,10 +754,10 @@ const columns: DataTableColumns<KeyItem> = [
                 circle: true,
                 onClick: () => copyToClipboard(row),
               },
-              { icon: () => h(NIcon, { component: CopyOutline }) }
+              { icon: () => h(NIcon, { component: CopyOutline }) },
             ),
           ],
-        }
+        },
       ),
   },
   {
@@ -753,7 +784,7 @@ const columns: DataTableColumns<KeyItem> = [
                   bordered: false,
                   type: pct >= 90 ? "error" : pct >= 70 ? "warning" : "success",
                 },
-                { default: () => `${pct}%` }
+                { default: () => `${pct}%` },
               ),
             ]),
             h(NProgress, {
@@ -764,7 +795,7 @@ const columns: DataTableColumns<KeyItem> = [
               height: 6,
             }),
           ],
-        }
+        },
       );
     },
   },
@@ -778,7 +809,7 @@ const columns: DataTableColumns<KeyItem> = [
         ? h(
             NTag,
             { size: "small", type: "error" },
-            { default: () => t("keys.status.invalid") }
+            { default: () => t("keys.status.invalid") },
           )
         : h(NSwitch, {
             size: "small",
@@ -814,10 +845,10 @@ const columns: DataTableColumns<KeyItem> = [
                     },
                     {
                       icon: () => h(NIcon, { component: SyncOutline }),
-                    }
+                    },
                   ),
                 default: () => t("keys.actions.syncUsage"),
-              }
+              },
             ),
             h(
               NTooltip,
@@ -834,10 +865,10 @@ const columns: DataTableColumns<KeyItem> = [
                     },
                     {
                       icon: () => h(NIcon, { component: RefreshOutline }),
-                    }
+                    },
                   ),
                 default: () => t("keys.actions.resetQuota"),
-              }
+              },
             ),
             h(
               NTooltip,
@@ -854,10 +885,10 @@ const columns: DataTableColumns<KeyItem> = [
                     },
                     {
                       icon: () => h(NIcon, { component: CreateOutline }),
-                    }
+                    },
                   ),
                 default: () => t("keys.actions.editKey"),
-              }
+              },
             ),
             h(
               NPopconfirm,
@@ -879,16 +910,16 @@ const columns: DataTableColumns<KeyItem> = [
                           },
                           {
                             icon: () => h(NIcon, { component: TrashOutline }),
-                          }
+                          },
                         ),
                       default: () => t("keys.actions.deleteKey"),
-                    }
+                    },
                   ),
                 default: () => t("keys.confirm.deleteKey"),
-              }
+              },
             ),
           ],
-        }
+        },
       ),
   },
 ];

@@ -20,4 +20,3 @@ func MaskAPIKey(key string) string {
 	}
 	return prefix + "****" + key[len(key)-4:]
 }
-

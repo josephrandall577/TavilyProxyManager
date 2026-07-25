@@ -5,17 +5,16 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"tavily-proxy/server/internal/models"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type CacheService struct {
-	db     *gorm.DB
-	logger *slog.Logger
+	db *gorm.DB
 }
 
 type CacheStats struct {
@@ -25,8 +24,8 @@ type CacheStats struct {
 	TotalSizeBytes int64 `json:"total_size_bytes"`
 }
 
-func NewCacheService(db *gorm.DB, logger *slog.Logger) *CacheService {
-	return &CacheService{db: db, logger: logger}
+func NewCacheService(db *gorm.DB) *CacheService {
+	return &CacheService{db: db}
 }
 
 func (s *CacheService) Lookup(ctx context.Context, cacheKey string) (*models.SearchCache, bool, error) {
@@ -49,22 +48,6 @@ func (s *CacheService) Store(ctx context.Context, cacheKey, query, requestBody, 
 	now := time.Now()
 	expiresAt := now.Add(ttl)
 
-	var existing models.SearchCache
-	err := s.db.WithContext(ctx).Where("cache_key = ?", cacheKey).First(&existing).Error
-	if err == nil {
-		return s.db.WithContext(ctx).Model(&existing).Updates(map[string]any{
-			"query":         query,
-			"request_body":  requestBody,
-			"response_body": responseBody,
-			"status_code":   statusCode,
-			"expires_at":    expiresAt,
-			"hit_count":     0,
-		}).Error
-	}
-	if err != gorm.ErrRecordNotFound {
-		return err
-	}
-
 	entry := models.SearchCache{
 		CacheKey:     cacheKey,
 		Query:        query,
@@ -75,7 +58,17 @@ func (s *CacheService) Store(ctx context.Context, cacheKey, query, requestBody, 
 		ExpiresAt:    expiresAt,
 		CreatedAt:    now,
 	}
-	return s.db.WithContext(ctx).Create(&entry).Error
+	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "cache_key"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"query":         query,
+			"request_body":  requestBody,
+			"response_body": responseBody,
+			"status_code":   statusCode,
+			"expires_at":    expiresAt,
+			"hit_count":     0,
+		}),
+	}).Create(&entry).Error
 }
 
 func (s *CacheService) Stats(ctx context.Context) (CacheStats, error) {

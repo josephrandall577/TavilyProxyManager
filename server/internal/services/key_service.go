@@ -3,7 +3,6 @@ package services
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"math/rand"
 	"sort"
 	"time"
@@ -14,12 +13,11 @@ import (
 )
 
 type KeyService struct {
-	db     *gorm.DB
-	logger *slog.Logger
+	db *gorm.DB
 }
 
-func NewKeyService(db *gorm.DB, logger *slog.Logger) *KeyService {
-	return &KeyService{db: db, logger: logger}
+func NewKeyService(db *gorm.DB) *KeyService {
+	return &KeyService{db: db}
 }
 
 func (s *KeyService) List(ctx context.Context) ([]models.APIKey, error) {

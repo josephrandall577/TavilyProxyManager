@@ -91,4 +91,3 @@ func generateSecret(bytes int) (string, error) {
 	}
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
-
