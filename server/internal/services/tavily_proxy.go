@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -38,6 +39,14 @@ type ProxyRequest struct {
 	Body        []byte
 	ClientIP    string
 	ContentType string
+	Stream      func(ProxyStreamResponse) error
+}
+
+type ProxyStreamResponse struct {
+	StatusCode     int
+	Headers        http.Header
+	Body           io.Reader
+	ProxyRequestID string
 }
 
 type ProxyResponse struct {
@@ -46,6 +55,8 @@ type ProxyResponse struct {
 	Body            []byte
 	ProxyRequestID  string
 	TavilyRequestID string
+	Streamed        bool
+	Credits         int
 }
 
 func NewTavilyProxy(baseURL string, timeout time.Duration, keys *KeyService, logs *LogService, stats *StatsService, logger *slog.Logger) *TavilyProxy {
@@ -197,18 +208,26 @@ func (p *TavilyProxy) Do(ctx context.Context, req ProxyRequest) (ProxyResponse, 
 	var lastRateLimitedKeyID uint
 	var lastRateLimitedKeyAlias string
 	var lastRateLimitedLatency int64
-	for _, key := range candidates {
+	for i, key := range candidates {
 		resp, status, latencyMs, tavilyReqID, err := p.tryKey(attemptCtx, key.ID, key.Key, req, proxyReqID)
 
+		var streamErr error
 		if err != nil {
-			p.logger.Warn("upstream request failed",
-				"request_id", proxyReqID,
-				"key_id", key.ID,
-				"key_alias", key.Alias,
-				"err", err,
-			)
-			lastErr = err
-			continue
+			if resp.Streamed {
+				streamErr = err
+			} else {
+				p.logger.Warn("upstream request failed",
+					"request_id", proxyReqID,
+					"key_id", key.ID,
+					"key_alias", key.Alias,
+					"err", err,
+				)
+				if strings.EqualFold(req.Method, http.MethodPost) && req.Path == "/research" {
+					return resp, err
+				}
+				lastErr = err
+				continue
+			}
 		}
 
 		switch status {
@@ -244,10 +263,14 @@ func (p *TavilyProxy) Do(ctx context.Context, req ProxyRequest) (ProxyResponse, 
 			)
 			_ = p.keys.MarkExhausted(ctx, key.ID)
 			continue
+		case http.StatusNotFound:
+			if strings.EqualFold(req.Method, http.MethodGet) && strings.HasPrefix(req.Path, "/research/") && i < len(candidates)-1 {
+				continue
+			}
 		}
 
-		if status == http.StatusOK && !strings.EqualFold(req.Method, http.MethodGet) {
-			_ = p.keys.IncrementUsed(ctx, key.ID)
+		if status >= http.StatusOK && status < http.StatusMultipleChoices && !strings.EqualFold(req.Method, http.MethodGet) {
+			_ = p.keys.IncrementUsed(ctx, key.ID, resp.Credits)
 		}
 
 		createdAt := time.Now()
@@ -302,6 +325,9 @@ func (p *TavilyProxy) Do(ctx context.Context, req ProxyRequest) (ProxyResponse, 
 			"status", status,
 			"latency_ms", time.Since(startTime).Milliseconds(),
 		)
+		if streamErr != nil {
+			return resp, streamErr
+		}
 		return resp, nil
 	}
 
@@ -443,6 +469,20 @@ func (p *TavilyProxy) tryKey(ctx context.Context, keyID uint, tavilyKey string, 
 		"key_id", keyID,
 	)
 
+	if req.Stream != nil && upstreamResp.StatusCode >= http.StatusOK && upstreamResp.StatusCode < http.StatusMultipleChoices && isEventStream(upstreamResp.Header) {
+		resp := ProxyResponse{
+			Streamed: true,
+			Credits:  1,
+		}
+		err := req.Stream(ProxyStreamResponse{
+			StatusCode:     upstreamResp.StatusCode,
+			Headers:        upstreamResp.Header.Clone(),
+			Body:           upstreamResp.Body,
+			ProxyRequestID: proxyReqID,
+		})
+		return resp, upstreamResp.StatusCode, latencyMs, "", err
+	}
+
 	body, err := io.ReadAll(upstreamResp.Body)
 	if err != nil {
 		p.logger.Warn("upstream response read error",
@@ -454,14 +494,37 @@ func (p *TavilyProxy) tryKey(ctx context.Context, keyID uint, tavilyKey string, 
 		return ProxyResponse{}, upstreamResp.StatusCode, latencyMs, "", err
 	}
 
-	requestID := extractRequestID(body)
+	requestID, credits := parseResponseMetadata(body)
 
 	return ProxyResponse{
 		StatusCode:     upstreamResp.StatusCode,
 		Headers:        upstreamResp.Header.Clone(),
 		Body:           body,
 		ProxyRequestID: proxyReqID,
+		Credits:        credits,
 	}, upstreamResp.StatusCode, latencyMs, requestID, nil
+}
+
+func isEventStream(headers http.Header) bool {
+	mediaType, _, err := mime.ParseMediaType(headers.Get("Content-Type"))
+	return err == nil && strings.EqualFold(mediaType, "text/event-stream")
+}
+
+func parseResponseMetadata(body []byte) (string, int) {
+	var out struct {
+		RequestID       string `json:"request_id"`
+		LegacyRequestID string `json:"requestId"`
+		Usage           struct {
+			Credits int `json:"credits"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(body, &out) != nil {
+		return "", 1
+	}
+	if out.RequestID == "" {
+		out.RequestID = out.LegacyRequestID
+	}
+	return out.RequestID, max(out.Usage.Credits, 1)
 }
 
 func copyHeaders(dst http.Header, src http.Header) {
@@ -474,20 +537,6 @@ func copyHeaders(dst http.Header, src http.Header) {
 			dst.Add(k, v)
 		}
 	}
-}
-
-func extractRequestID(body []byte) string {
-	var m map[string]any
-	if err := json.Unmarshal(body, &m); err != nil {
-		return ""
-	}
-	if v, ok := m["request_id"].(string); ok && v != "" {
-		return v
-	}
-	if v, ok := m["requestId"].(string); ok && v != "" {
-		return v
-	}
-	return ""
 }
 
 type usageResponse struct {

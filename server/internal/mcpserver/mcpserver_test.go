@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -17,6 +18,130 @@ import (
 	"tavily-proxy/server/internal/db"
 	"tavily-proxy/server/internal/services"
 )
+
+func TestLatestTavilyInputSchemas(t *testing.T) {
+	t.Parallel()
+
+	search := schemaProperties(t, tavilySearchInputSchema)
+	for _, name := range []string{"exact_match", "timeout", "safe_search"} {
+		if _, ok := search[name]; !ok {
+			t.Errorf("search schema missing %q", name)
+		}
+	}
+
+	extract := schemaProperties(t, tavilyExtractInputSchema)
+	for _, name := range []string{"query", "chunks_per_source", "timeout"} {
+		if _, ok := extract[name]; !ok {
+			t.Errorf("extract schema missing %q", name)
+		}
+	}
+	for _, name := range []string{"include_image_descriptions", "include_domains", "exclude_domains", "country"} {
+		if _, ok := extract[name]; ok {
+			t.Errorf("extract schema contains unsupported %q", name)
+		}
+	}
+	urls := mustStructuredMap(t, extract["urls"])
+	if _, ok := urls["oneOf"]; !ok {
+		t.Error("extract urls must accept either one URL or an array")
+	}
+
+	for schemaName, schema := range map[string]map[string]any{"crawl": tavilyCrawlInputSchema, "map": tavilyMapInputSchema} {
+		properties := schemaProperties(t, schema)
+		if _, ok := properties["timeout"]; !ok {
+			t.Errorf("%s schema missing timeout", schemaName)
+		}
+		breadth := mustStructuredMap(t, properties["max_breadth"])
+		if breadth["maximum"] != 500 {
+			t.Errorf("%s max_breadth maximum = %v, want 500", schemaName, breadth["maximum"])
+		}
+	}
+	if _, ok := schemaProperties(t, tavilyCrawlInputSchema)["chunks_per_source"]; !ok {
+		t.Error("crawl schema missing chunks_per_source")
+	}
+	for _, name := range []string{"include_images", "extract_depth", "format", "include_favicon"} {
+		if _, ok := schemaProperties(t, tavilyMapInputSchema)[name]; ok {
+			t.Errorf("map schema contains unsupported %q", name)
+		}
+	}
+	researchStream := mustStructuredMap(t, schemaProperties(t, tavilyResearchInputSchema)["stream"])
+	if researchStream["const"] != false {
+		t.Errorf("research stream const = %v, want false", researchStream["const"])
+	}
+}
+
+func TestTavilyResearchToolsProxyCreateAndStatus(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+	database, err := db.Open(filepath.Join(t.TempDir(), "app.db"))
+	if err != nil {
+		t.Fatalf("db open: %v", err)
+	}
+	sqlDB, err := database.DB()
+	if err != nil {
+		t.Fatalf("db handle: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	master := services.NewMasterKeyService(database, logger)
+	if err := master.LoadOrCreate(ctx); err != nil {
+		t.Fatalf("master key init: %v", err)
+	}
+	keys := services.NewKeyService(database)
+	if _, err := keys.Create(ctx, "tvly-pool", "", 1000); err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer tvly-pool" {
+			t.Errorf("unexpected authorization: %q", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/research":
+			body, _ := io.ReadAll(r.Body)
+			if !bytes.Contains(body, []byte(`"input":"latest Tavily API"`)) {
+				t.Errorf("unexpected research body: %s", body)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"request_id":"research-1","status":"pending"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/research/research-1":
+			_, _ = w.Write([]byte(`{"request_id":"research-1","status":"completed"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	handler := NewHandler(Dependencies{
+		MasterKey:  master,
+		Proxy:      services.NewTavilyProxy(upstream.URL, 3*time.Second, keys, nil, nil, logger),
+		Stateless:  true,
+		SessionTTL: time.Minute,
+	})
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	session := connectMCPClient(t, server.URL, master.Get())
+	defer session.Close()
+
+	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	created, err := session.CallTool(callCtx, &mcp.CallToolParams{
+		Name:      "tavily-research",
+		Arguments: map[string]any{"input": "latest Tavily API"},
+	})
+	if err != nil || created.IsError {
+		t.Fatalf("create research: result=%+v err=%v", created, err)
+	}
+	status, err := session.CallTool(callCtx, &mcp.CallToolParams{
+		Name:      "tavily-research-status",
+		Arguments: map[string]any{"request_id": "research-1"},
+	})
+	if err != nil || status.IsError {
+		t.Fatalf("get research status: result=%+v err=%v", status, err)
+	}
+}
 
 func TestTavilyUsage_ReturnsAggregatedStatsWithoutUpstreamCall(t *testing.T) {
 	t.Parallel()
@@ -265,6 +390,11 @@ func mustStructuredMap(t *testing.T, v any) map[string]any {
 		t.Fatalf("unexpected structured type: %T", v)
 	}
 	return out
+}
+
+func schemaProperties(t *testing.T, schema map[string]any) map[string]any {
+	t.Helper()
+	return mustStructuredMap(t, schema["properties"])
 }
 
 func asInt64(t *testing.T, v any) int64 {

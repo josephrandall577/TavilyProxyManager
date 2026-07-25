@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -19,6 +20,91 @@ import (
 	"tavily-proxy/server/internal/db"
 	"tavily-proxy/server/internal/services"
 )
+
+func TestProxyStreamsEventSourceResponses(t *testing.T) {
+	t.Parallel()
+
+	firstEventSent := make(chan struct{})
+	releaseUpstream := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: first\n\n"))
+		w.(http.Flusher).Flush()
+		close(firstEventSent)
+		<-releaseUpstream
+		_, _ = w.Write([]byte("data: done\n\n"))
+	}))
+	t.Cleanup(upstream.Close)
+
+	database, err := db.Open(filepath.Join(t.TempDir(), "app.db"))
+	if err != nil {
+		t.Fatalf("db open: %v", err)
+	}
+	sqlDB, err := database.DB()
+	if err != nil {
+		t.Fatalf("db handle: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+	master := services.NewMasterKeyService(database, logger)
+	if err := master.LoadOrCreate(ctx); err != nil {
+		t.Fatalf("master key init: %v", err)
+	}
+	keys := services.NewKeyService(database)
+	if _, err := keys.Create(ctx, "tvly-stream", "", 1000); err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	router := NewRouter(Dependencies{
+		MasterKeyService: master,
+		TavilyProxy:      services.NewTavilyProxy(upstream.URL, 5*time.Second, keys, nil, nil, logger),
+	})
+	proxyServer := httptest.NewServer(router)
+	t.Cleanup(proxyServer.Close)
+
+	req, err := http.NewRequest(http.MethodPost, proxyServer.URL+"/research", strings.NewReader(`{"input":"test","stream":true}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+master.Get())
+	req.Header.Set("Content-Type", "application/json")
+	type result struct {
+		resp *http.Response
+		err  error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		resp, err := http.DefaultClient.Do(req)
+		resultCh <- result{resp: resp, err: err}
+	}()
+
+	select {
+	case <-firstEventSent:
+	case <-time.After(time.Second):
+		close(releaseUpstream)
+		t.Fatal("upstream did not start event stream")
+	}
+	select {
+	case got := <-resultCh:
+		if got.err != nil {
+			close(releaseUpstream)
+			t.Fatalf("proxy request: %v", got.err)
+		}
+		defer got.resp.Body.Close()
+		line, err := bufio.NewReader(got.resp.Body).ReadString('\n')
+		close(releaseUpstream)
+		if err != nil {
+			t.Fatalf("read first event: %v", err)
+		}
+		if line != "data: first\n" {
+			t.Fatalf("unexpected first event: %q", line)
+		}
+	case <-time.After(time.Second):
+		close(releaseUpstream)
+		t.Fatal("proxy buffered event stream instead of forwarding headers immediately")
+	}
+}
 
 func init() {
 	gin.SetMode(gin.TestMode)

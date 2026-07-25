@@ -152,12 +152,14 @@ curl -X POST "http://localhost:8080/search" \
 
 **兼容性说明**:
 
+- 支持 Tavily Search、Extract、Crawl、Map、Research 及 Research 状态查询；Research 的 SSE 响应会实时转发。
 - 支持 `{"api_key": "<MASTER_KEY>"}` 或 `{"apiKey": "<MASTER_KEY>"}`。
 - 支持 GET 参数 `?api_key=<MASTER_KEY>`。
 
 ### MCP (Model Context Protocol)
 
 服务在 `http://localhost:8080/mcp` 提供 HTTP MCP 端点。
+内置 `tavily-search`、`tavily-extract`、`tavily-crawl`、`tavily-map`、`tavily-research`、`tavily-research-status` 和 `tavily-usage` 工具；实时 Research 流请使用 REST API。
 
 默认启用无状态模式（`MCP_STATELESS=true`），可避免客户端出现 `session not found`。
 如需有状态会话，请将 `MCP_STATELESS=false`，并确保上游反向代理正确透传 `Mcp-Session-Id` 且启用会话粘性（sticky）。

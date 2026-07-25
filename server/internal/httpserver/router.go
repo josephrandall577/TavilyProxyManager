@@ -713,7 +713,31 @@ func handleProxy(c *gin.Context, proxy *services.TavilyProxy, body []byte, rawQu
 		Body:        body,
 		ClientIP:    c.ClientIP(),
 		ContentType: c.GetHeader("Content-Type"),
+		Stream: func(stream services.ProxyStreamResponse) error {
+			copyProxyResponseHeaders(c, stream.Headers)
+			c.Header("X-Proxy-Request-ID", stream.ProxyRequestID)
+			c.Status(stream.StatusCode)
+			buffer := make([]byte, 32*1024)
+			for {
+				n, readErr := stream.Body.Read(buffer)
+				if n > 0 {
+					if _, writeErr := c.Writer.Write(buffer[:n]); writeErr != nil {
+						return writeErr
+					}
+					c.Writer.Flush()
+				}
+				if readErr != nil {
+					if errors.Is(readErr, io.EOF) {
+						return nil
+					}
+					return readErr
+				}
+			}
+		},
 	})
+	if resp.Streamed {
+		return
+	}
 	if err != nil {
 		if errors.Is(err, services.ErrNoAvailableKeys) {
 			c.JSON(http.StatusServiceUnavailable, gin.H{
@@ -726,14 +750,7 @@ func handleProxy(c *gin.Context, proxy *services.TavilyProxy, body []byte, rawQu
 		return
 	}
 
-	for k, vv := range resp.Headers {
-		if isHopByHopHeader(k) || strings.EqualFold(k, "Content-Length") {
-			continue
-		}
-		for _, v := range vv {
-			c.Writer.Header().Add(k, v)
-		}
-	}
+	copyProxyResponseHeaders(c, resp.Headers)
 	c.Header("X-Proxy-Request-ID", resp.ProxyRequestID)
 	if resp.TavilyRequestID != "" {
 		c.Header("X-Tavily-Request-ID", resp.TavilyRequestID)
@@ -741,6 +758,17 @@ func handleProxy(c *gin.Context, proxy *services.TavilyProxy, body []byte, rawQu
 
 	c.Status(resp.StatusCode)
 	_, _ = io.Copy(c.Writer, bytes.NewReader(resp.Body))
+}
+
+func copyProxyResponseHeaders(c *gin.Context, headers http.Header) {
+	for k, vv := range headers {
+		if isHopByHopHeader(k) || strings.EqualFold(k, "Content-Length") {
+			continue
+		}
+		for _, v := range vv {
+			c.Writer.Header().Add(k, v)
+		}
+	}
 }
 
 func isHopByHopHeader(k string) bool {

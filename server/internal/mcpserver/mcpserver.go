@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -47,6 +48,12 @@ func NewHandler(deps Dependencies) http.Handler {
 		Description: "Map a website's URL structure (via Tavily Proxy Pool)",
 		InputSchema: tavilyMapInputSchema,
 	}, http.MethodPost, "/map")
+	addProxyTool(server, deps.Proxy, &mcp.Tool{
+		Name:        "tavily-research",
+		Description: "Create a Tavily Research task (via Tavily Proxy Pool)",
+		InputSchema: tavilyResearchInputSchema,
+	}, http.MethodPost, "/research")
+	addResearchStatusTool(server, deps.Proxy)
 	addUsageTool(server, deps.Stats, &mcp.Tool{
 		Name:        "tavily-usage",
 		Description: "Get aggregated usage/quota info from local key statistics",
@@ -95,47 +102,66 @@ func addProxyTool(server *mcp.Server, proxy *services.TavilyProxy, tool *mcp.Too
 			ClientIP:    "mcp",
 			ContentType: "application/json",
 		})
-		if err != nil {
-			return &mcp.CallToolResult{
-				IsError: true,
-				Content: []mcp.Content{
-					&mcp.TextContent{Text: err.Error()},
-				},
-				StructuredContent: map[string]any{"error": err.Error()},
-			}, nil
-		}
-
-		text := string(resp.Body)
-
-		var parsed any
-		if err := json.Unmarshal(resp.Body, &parsed); err != nil {
-			parsed = nil
-		}
-
-		var structured any
-		if m, ok := parsed.(map[string]any); ok {
-			structured = m
-		} else {
-			structured = map[string]any{"raw": text}
-		}
-
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return &mcp.CallToolResult{
-				IsError: true,
-				Content: []mcp.Content{
-					&mcp.TextContent{Text: fmt.Sprintf("Upstream status %d: %s", resp.StatusCode, text)},
-				},
-				StructuredContent: structured,
-			}, nil
-		}
-
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{
-				&mcp.TextContent{Text: text},
-			},
-			StructuredContent: structured,
-		}, nil
+		return proxyToolResult(resp, err), nil
 	})
+}
+
+func addResearchStatusTool(server *mcp.Server, proxy *services.TavilyProxy) {
+	server.AddTool(&mcp.Tool{
+		Name:        "tavily-research-status",
+		Description: "Get a Tavily Research task status and result (via Tavily Proxy Pool)",
+		InputSchema: map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"required":             []string{"request_id"},
+			"properties": map[string]any{
+				"request_id": map[string]any{"type": "string", "minLength": 1},
+			},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var args struct {
+			RequestID string `json:"request_id"`
+		}
+		if err := json.Unmarshal(req.Params.Arguments, &args); err != nil || strings.TrimSpace(args.RequestID) == "" {
+			return proxyToolResult(services.ProxyResponse{}, fmt.Errorf("request_id is required")), nil
+		}
+		resp, err := proxy.Do(ctx, services.ProxyRequest{
+			Method:   http.MethodGet,
+			Path:     "/research/" + url.PathEscape(args.RequestID),
+			Headers:  http.Header{"User-Agent": {"tavily-proxy-mcp"}},
+			ClientIP: "mcp",
+		})
+		return proxyToolResult(resp, err), nil
+	})
+}
+
+func proxyToolResult(resp services.ProxyResponse, err error) *mcp.CallToolResult {
+	if err != nil {
+		return &mcp.CallToolResult{
+			IsError:           true,
+			Content:           []mcp.Content{&mcp.TextContent{Text: err.Error()}},
+			StructuredContent: map[string]any{"error": err.Error()},
+		}
+	}
+
+	text := string(resp.Body)
+	var parsed any
+	if err := json.Unmarshal(resp.Body, &parsed); err != nil {
+		parsed = nil
+	}
+	structured, ok := parsed.(map[string]any)
+	if !ok {
+		structured = map[string]any{"raw": text}
+	}
+	result := &mcp.CallToolResult{
+		Content:           []mcp.Content{&mcp.TextContent{Text: text}},
+		StructuredContent: structured,
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		result.IsError = true
+		result.Content = []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Upstream status %d: %s", resp.StatusCode, text)}}
+	}
+	return result
 }
 
 func addUsageTool(server *mcp.Server, stats *services.StatsService, tool *mcp.Tool) {
@@ -300,6 +326,22 @@ var tavilySearchInputSchema = map[string]any{
 			"default":     false,
 			"description": "Whether to include credit usage information in the response.",
 		},
+		"exact_match": map[string]any{
+			"type":        "boolean",
+			"default":     false,
+			"description": "Only return results containing exact quoted phrases from the query.",
+		},
+		"timeout": map[string]any{
+			"type":        "number",
+			"minimum":     1,
+			"default":     60,
+			"description": "Request timeout in seconds.",
+		},
+		"safe_search": map[string]any{
+			"type":        "boolean",
+			"default":     false,
+			"description": "Enable Enterprise safe-search filtering; unsupported with fast and ultra-fast depth.",
+		},
 	},
 }
 
@@ -309,9 +351,21 @@ var tavilyExtractInputSchema = map[string]any{
 	"required":             []string{"urls"},
 	"properties": map[string]any{
 		"urls": map[string]any{
-			"type":        "array",
-			"items":       map[string]any{"type": "string"},
+			"oneOf": []any{
+				map[string]any{"type": "string"},
+				map[string]any{"type": "array", "maxItems": 20, "items": map[string]any{"type": "string"}},
+			},
 			"description": "URLs to extract content from.",
+		},
+		"query": map[string]any{
+			"type":        "string",
+			"description": "Query used to rank relevant chunks from each URL.",
+		},
+		"chunks_per_source": map[string]any{
+			"type":        "integer",
+			"minimum":     1,
+			"maximum":     5,
+			"description": "Relevant chunks per source when query is supplied.",
 		},
 		"extract_depth": map[string]any{
 			"type":        "string",
@@ -330,11 +384,6 @@ var tavilyExtractInputSchema = map[string]any{
 			"default":     false,
 			"description": "Include images.",
 		},
-		"include_image_descriptions": map[string]any{
-			"type":        "boolean",
-			"default":     false,
-			"description": "Include descriptions for extracted images.",
-		},
 		"include_favicon": map[string]any{
 			"type":        "boolean",
 			"default":     false,
@@ -345,19 +394,12 @@ var tavilyExtractInputSchema = map[string]any{
 			"default":     false,
 			"description": "Include credit usage information in the response.",
 		},
-		"include_domains": map[string]any{
-			"type":        "array",
-			"items":       map[string]any{"type": "string"},
-			"description": "Domains to include.",
-		},
-		"exclude_domains": map[string]any{
-			"type":        "array",
-			"items":       map[string]any{"type": "string"},
-			"description": "Domains to exclude.",
-		},
-		"country": map[string]any{
-			"type":        "string",
-			"description": "Prioritize content from a specific country (lowercase plain English).",
+		"timeout": map[string]any{
+			"type":        "number",
+			"minimum":     1,
+			"maximum":     60,
+			"default":     30,
+			"description": "Request timeout in seconds.",
 		},
 	},
 }
@@ -385,6 +427,7 @@ var tavilyMapInputSchema = map[string]any{
 		"max_breadth": map[string]any{
 			"type":        "integer",
 			"minimum":     1,
+			"maximum":     500,
 			"default":     20,
 			"description": "Max number of links to follow per level.",
 		},
@@ -419,32 +462,16 @@ var tavilyMapInputSchema = map[string]any{
 			"default":     true,
 			"description": "Allow following external-domain links.",
 		},
-		"include_images": map[string]any{
-			"type":        "boolean",
-			"default":     false,
-			"description": "Include images discovered during mapping.",
-		},
-		"extract_depth": map[string]any{
-			"type":        "string",
-			"enum":        []string{"basic", "advanced"},
-			"default":     "basic",
-			"description": "Extraction depth for mapped pages.",
-		},
-		"format": map[string]any{
-			"type":        "string",
-			"enum":        []string{"markdown", "text"},
-			"default":     "markdown",
-			"description": "Format of extracted content.",
-		},
-		"include_favicon": map[string]any{
-			"type":        "boolean",
-			"default":     false,
-			"description": "Include favicon URL for each result.",
-		},
 		"include_usage": map[string]any{
 			"type":        "boolean",
 			"default":     false,
 			"description": "Include credit usage information in the response.",
+		},
+		"timeout": map[string]any{
+			"type":        "number",
+			"minimum":     1,
+			"default":     150,
+			"description": "Request timeout in seconds.",
 		},
 	},
 }
@@ -462,6 +489,12 @@ var tavilyCrawlInputSchema = map[string]any{
 			"type":        "string",
 			"description": "Natural language instructions for the crawler.",
 		},
+		"chunks_per_source": map[string]any{
+			"type":        "integer",
+			"minimum":     1,
+			"maximum":     5,
+			"description": "Relevant chunks per page when instructions are supplied.",
+		},
 		"max_depth": map[string]any{
 			"type":        "integer",
 			"minimum":     1,
@@ -472,6 +505,7 @@ var tavilyCrawlInputSchema = map[string]any{
 		"max_breadth": map[string]any{
 			"type":        "integer",
 			"minimum":     1,
+			"maximum":     500,
 			"default":     20,
 			"description": "Max number of links to follow per level.",
 		},
@@ -532,6 +566,43 @@ var tavilyCrawlInputSchema = map[string]any{
 			"type":        "boolean",
 			"default":     false,
 			"description": "Include credit usage information in the response.",
+		},
+		"timeout": map[string]any{
+			"type":        "number",
+			"minimum":     1,
+			"default":     150,
+			"description": "Request timeout in seconds.",
+		},
+	},
+}
+
+var tavilyResearchInputSchema = map[string]any{
+	"type":                 "object",
+	"additionalProperties": true,
+	"required":             []string{"input"},
+	"properties": map[string]any{
+		"input": map[string]any{"type": "string", "description": "Research task or question."},
+		"model": map[string]any{
+			"type": "string", "enum": []string{"mini", "pro", "auto"}, "default": "auto",
+		},
+		"stream": map[string]any{
+			"type": "boolean", "const": false, "default": false, "description": "Use the REST endpoint for real-time SSE delivery.",
+		},
+		"output_schema":   map[string]any{"type": "object"},
+		"citation_format": map[string]any{"type": "string", "enum": []string{"numbered", "mla", "apa", "chicago"}},
+		"include_domains": map[string]any{"type": "array", "maxItems": 20, "items": map[string]any{"type": "string"}},
+		"exclude_domains": map[string]any{"type": "array", "maxItems": 20, "items": map[string]any{"type": "string"}},
+		"output_length":   map[string]any{"type": "string", "enum": []string{"short", "standard", "long"}},
+		"files": map[string]any{
+			"type": "array", "maxItems": 5,
+			"items": map[string]any{
+				"type": "object", "required": []string{"name", "data", "type"}, "additionalProperties": false,
+				"properties": map[string]any{
+					"name": map[string]any{"type": "string"},
+					"data": map[string]any{"type": "string", "description": "Base64-encoded file data."},
+					"type": map[string]any{"type": "string"},
+				},
+			},
 		},
 	},
 }

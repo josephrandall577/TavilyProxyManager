@@ -243,3 +243,149 @@ func TestTavilyProxy_MixedFailuresPreferTooManyRequests(t *testing.T) {
 		t.Fatalf("second key should be marked invalid: active=%v invalid=%v", gotSecond.IsActive, gotSecond.IsInvalid)
 	}
 }
+
+func TestTavilyProxy_TracksReportedCreditsForAnySuccessfulStatus(t *testing.T) {
+	t.Parallel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"request_id":"research-1","usage":{"credits":3}}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	ctx, keys, proxy := newTavilyProxyTestDeps(t, upstream.URL)
+	key, err := keys.Create(ctx, "tvly-research", "", 1000)
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+
+	resp, err := proxy.Do(ctx, ProxyRequest{Method: http.MethodPost, Path: "/research", Body: []byte(`{"input":"test"}`)})
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+	got, err := keys.Get(ctx, key.ID)
+	if err != nil {
+		t.Fatalf("get key: %v", err)
+	}
+	if got.UsedQuota != 3 {
+		t.Fatalf("used quota = %d, want 3", got.UsedQuota)
+	}
+}
+
+func TestTavilyProxy_StreamErrorStillAccountsAcceptedRequest(t *testing.T) {
+	t.Parallel()
+
+	var calls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: accepted\n\n"))
+	}))
+	t.Cleanup(upstream.Close)
+
+	ctx, keys, proxy := newTavilyProxyTestDeps(t, upstream.URL)
+	key, err := keys.Create(ctx, "tvly-stream", "", 1000)
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	if _, err := keys.Create(ctx, "tvly-unused", "", 500); err != nil {
+		t.Fatalf("create fallback key: %v", err)
+	}
+
+	streamErr := errors.New("client disconnected")
+	resp, err := proxy.Do(ctx, ProxyRequest{
+		Method: http.MethodPost,
+		Path:   "/research",
+		Stream: func(ProxyStreamResponse) error { return streamErr },
+	})
+	if !errors.Is(err, streamErr) {
+		t.Fatalf("proxy error = %v, want %v", err, streamErr)
+	}
+	if !resp.Streamed {
+		t.Fatal("response was not marked streamed")
+	}
+	got, err := keys.Get(ctx, key.ID)
+	if err != nil {
+		t.Fatalf("get key: %v", err)
+	}
+	if got.UsedQuota != 1 {
+		t.Fatalf("used quota = %d, want 1", got.UsedQuota)
+	}
+	if calls != 1 {
+		t.Fatalf("upstream calls = %d, want 1", calls)
+	}
+}
+
+func TestTavilyProxy_ResearchCreateTransportErrorDoesNotFailOver(t *testing.T) {
+	t.Parallel()
+
+	ctx, keys, proxy := newTavilyProxyTestDeps(t, "https://example.invalid")
+	for _, key := range []string{"tvly-first", "tvly-second"} {
+		if _, err := keys.Create(ctx, key, "", 1000); err != nil {
+			t.Fatalf("create key: %v", err)
+		}
+	}
+
+	var calls int
+	proxy.client.Transport = roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("connection reset after upload")
+	})
+
+	_, err := proxy.Do(ctx, ProxyRequest{Method: http.MethodPost, Path: "/research", Body: []byte(`{"input":"test"}`)})
+	if err == nil {
+		t.Fatal("expected transport error")
+	}
+	if calls != 1 {
+		t.Fatalf("upstream calls = %d, want 1", calls)
+	}
+}
+
+func TestTavilyProxy_ResearchStatusRetriesNotFoundWithNextKey(t *testing.T) {
+	t.Parallel()
+
+	var firstCalls, secondCalls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch bearerToken(r) {
+		case "tvly-first":
+			firstCalls++
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"detail":"not found"}`))
+		case "tvly-second":
+			secondCalls++
+			_, _ = w.Write([]byte(`{"request_id":"research-1","status":"completed"}`))
+		default:
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	ctx, keys, proxy := newTavilyProxyTestDeps(t, upstream.URL)
+	if _, err := keys.Create(ctx, "tvly-first", "", 2000); err != nil {
+		t.Fatalf("create first key: %v", err)
+	}
+	if _, err := keys.Create(ctx, "tvly-second", "", 1000); err != nil {
+		t.Fatalf("create second key: %v", err)
+	}
+
+	resp, err := proxy.Do(ctx, ProxyRequest{Method: http.MethodGet, Path: "/research/research-1"})
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if firstCalls != 1 || secondCalls != 1 {
+		t.Fatalf("unexpected calls: first=%d second=%d", firstCalls, secondCalls)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}

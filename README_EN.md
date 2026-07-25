@@ -152,12 +152,14 @@ curl -X POST "http://localhost:8080/search" \
 
 **Compatibility Notes**:
 
+- Supports Tavily Search, Extract, Crawl, Map, Research, and Research status requests; Research SSE responses are forwarded in real time.
 - Supports `{"api_key": "<MASTER_KEY>"}` or `{"apiKey": "<MASTER_KEY>"}` in JSON bodies.
 - Supports the `api_key=<MASTER_KEY>` GET parameter.
 
 ### MCP (Model Context Protocol)
 
 The server provides an HTTP MCP endpoint at `http://localhost:8080/mcp`.
+It exposes `tavily-search`, `tavily-extract`, `tavily-crawl`, `tavily-map`, `tavily-research`, `tavily-research-status`, and `tavily-usage`; use the REST API for live Research streaming.
 
 Stateless mode is enabled by default (`MCP_STATELESS=true`) to avoid `session not found` errors.
 If you need stateful sessions, set `MCP_STATELESS=false` and ensure your reverse proxy forwards `Mcp-Session-Id` and uses sticky sessions.

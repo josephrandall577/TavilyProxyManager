@@ -117,10 +117,13 @@ func (s *KeyService) MarkExhausted(ctx context.Context, id uint) error {
 		Update("used_quota", gorm.Expr("total_quota")).Error
 }
 
-func (s *KeyService) IncrementUsed(ctx context.Context, id uint) error {
+func (s *KeyService) IncrementUsed(ctx context.Context, id uint, amount int) error {
+	if amount < 1 {
+		amount = 1
+	}
 	now := time.Now()
 	return s.db.WithContext(ctx).Model(&models.APIKey{}).Where("id = ?", id).Updates(map[string]any{
-		"used_quota":   gorm.Expr("CASE WHEN used_quota + 1 > total_quota THEN total_quota ELSE used_quota + 1 END"),
+		"used_quota":   gorm.Expr("CASE WHEN used_quota + ? > total_quota THEN total_quota ELSE used_quota + ? END", amount, amount),
 		"last_used_at": &now,
 	}).Error
 }
