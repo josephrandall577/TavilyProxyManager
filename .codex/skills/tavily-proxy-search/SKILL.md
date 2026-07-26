@@ -50,14 +50,9 @@ For native MCP tool calling, send the object directly. Example:
 }
 ```
 
-In OpenMinis, discover tools once, then pass typed JSON through `--input`:
+Use the agent's MCP tool discovery when available. Treat the connected server's current `inputSchema` as authoritative if it differs from this reference.
 
-```sh
-minis-mcp-cli tools tavily-proxy --refresh
-minis-mcp-cli call tavily-proxy tavily_search --input '{"query":"OpenAI Responses API current documentation","auto_parameters":false,"search_depth":"basic","max_results":5}'
-```
-
-Use `--input` for booleans, numbers, arrays, and nested values. OpenMinis trailing `key=value` arguments are strings, so do not use them for typed Tavily parameters. Do not wrap the object in `arguments`, `input`, or `params`; the sole exception is the `tavily_research` field named `input`.
+Preserve JSON types for booleans, numbers, arrays, and objects. Pass only the tool arguments through the agent's normal tool-call interface; the host may wrap them in MCP JSON-RPC `params.arguments`. Do not add an extra application-level `input`, `arguments`, or `params` wrapper. The sole exception is the required `tavily_research` field named `input`.
 
 ## Tool Parameters
 
