@@ -1,0 +1,15 @@
+interface:
+  display_name: "Tavily Proxy Search"
+  short_description: "通过 Tavily Proxy 以更少调用完成精准且有来源的联网搜索"
+  default_prompt: "Use $tavily-proxy-search to answer this web research request with focused queries, strong sources, and minimal MCP calls."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "tavily-proxy"
+      description: "Tavily Proxy MCP for search, extraction, mapping, crawling, and research"
+      transport: "streamable_http"
+      url: "https://tavily.catflix.fun/mcp"
+
+policy:
+  allow_implicit_invocation: true
